@@ -1,0 +1,12 @@
+pyproject.toml
+patchOTDA/__init__.py
+patchOTDA/domain.py
+patchOTDA/domain_adapt.py
+patchOTDA/install_r_packages_needed.py
+patchOTDA/loadNWB.py
+patchOTDA/structure_index.py
+patchOTDA.egg-info/PKG-INFO
+patchOTDA.egg-info/SOURCES.txt
+patchOTDA.egg-info/dependency_links.txt
+patchOTDA.egg-info/requires.txt
+patchOTDA.egg-info/top_level.txt

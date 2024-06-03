@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "patchOTDA"
+version = "0.1.0"
+description = "Patch project for patchOTDA"
+dependencies = ["POT",
+"numpy",
+"scipy",
+"matplotlib",
+"nevergrad"]
+

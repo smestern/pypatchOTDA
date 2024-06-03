@@ -1,0 +1,5 @@
+POT
+numpy
+scipy
+matplotlib
+nevergrad
