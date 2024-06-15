@@ -71,16 +71,16 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
             transporter = ot.da.EMDLaplaceTransport
 
         if isinstance(transporter, str):
-            #eval is dangerous, maybe remove?
-            self.inittransporter = eval('ot.da.'+transporter)
-        else:
-            self.inittransporter = transporter
+            transporter = getattr(ot.da, transporter)
         
         #super().__init__(**kwargs)
         #dont super init here, instantiate transporter first
+        self.inittransporter = transporter
         self.transporter = self.inittransporter(**getValidKwargs(transporter, kwargs))
         self._kwargs = kwargs
         self.flexible_transporter = flexible_transporter
+
+        logger.info(f"Initialized PatchClampOTDA with transporter: {self.inittransporter}")
         
 
     def fit(self, Xs, Xt, Ys=None, Yt=None):
@@ -99,11 +99,11 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
         self.transporter.fit(Xs=Xs, Xt=Xt, ys=Ys, yt=Yt)
         return self.transporter.transform(Xs=Xs, Xt=Xt, ys=Ys, yt=Yt)
     
-    def tune(self, Xs, Xt, Ys=None, Yt=None, n_iter=20, n_jobs=-1, method='bidirectional', error_func=None, verbose=False):
+    def tune(self, Xs, Xt, Ys=None, Yt=None, n_iter=20, n_jobs=-1, method='unidirectional', supervised=False, error_func=None, verbose=False):
         """ Tune the parameters of the OTDA based transporter to the datasets provided.
         Tunes the reg parameters and the norm of the data sets. Currently supports using an error function base on
         the mse between randomly skewed data and Xt.
-        Supports paralellism via n_jobs. The total number of points queried is (n_iter x n_jobs)
+        Supports paralellism via n_jobs. The total number of points queried is (n_iter)
         Uses nevergrad as optimizer backend. TODO// allow user to select optimizer
 
         Args:
@@ -114,29 +114,53 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
             n_iter (int, optional): _description_. Defaults to 10.
             n_jobs (int, optional): _description_. Defaults to -1.
             method (str, optional): _description_. Defaults to 'bidirectional'.
-            verbose (bool, optional): _description_. Defaults to True.
+            verbose ((bool or int), optional): _description_. Defaults to False. Levels of verbosity. 0 is no output, 1 is some output, 2 is all output.
 
         Returns:
             _type_: _description_
         """
+        #handle verbosity
+        if int(verbose)>0:
+            
+            logger.setLevel(logging.INFO)
+            logging.basicConfig(level=logging.INFO)
+            logging.info("Setting verbosity to INFO")
+        else:
+            logger.setLevel(logging.WARNING)
+
+        #do some error checking
+        if error_func is None and method == 'bidirectional': #if there is no error and we are using bidirectional, all cool
+            pass
+        elif error_func is None and method == 'unidirectional': #if there is no error and we are using unidirectional, all cool
+            if supervised is True:
+                if Ys is None or Yt is None:
+                    raise ValueError("Must provide labels for supervised learning")
+                logger.info("Using default error function for supervised learning")
+                error_func = rf_clf_dist
+            else:
+                logger.info("Using default error function for unsupervised learning")
+                error_func = gw_dist
+        else:
+            logger.info("Using user provided error function")
+
+        #prep the optimization dict
         if method == 'bidirectional':
             #if the user wants to use the bidirectional method, we do not need to update the dict. 
             #we just need to update the error function, enforce it is None, and set the method to bidirectional
             if error_func is not None:
                 raise ValueError('Cannot use error_func with bidirectional method')
             #now just run the bidirectional tune
-            self.param_dict = self.init_param_dict(Xs, Xt, method, error_func)
+            self.param_dict = self.init_param_dict(Xs, Xt, method, error_func, supervised)
             return self._tune(Xt, Xs, Ys, Yt, n_iter, n_jobs, method=method, verbose=verbose)
         elif method == 'unidirectional':
-            
             #now just run the unidirectional tune
-            self.param_dict = self.init_param_dict(Xs, Xt, method, error_func)
+            self.param_dict = self.init_param_dict(Xs, Xt, method, error_func, supervised)
             return self._tune(Xs, Xt, Ys, Yt, n_iter, n_jobs, error_func, method, verbose)
         
 
         return self
     
-    def _tune(self, Xs, Xt, Ys=None, Yt=None, n_iter=20, n_jobs=-1, error_func=None, method='bidirectional', verbose=False):
+    def _tune(self, Xs, Xt, Ys=None, Yt=None, n_iter=20, n_jobs=-1, error_func=None, method='unidirectional', verbose=False):
         """ Tune the parameters of the OTDA based transporter to the datasets provided.
         Tunes the reg parameters and the norm of the data sets. Currently supports using an error function base on
         the mse between randomly skewed data and Xt.
@@ -175,28 +199,27 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
         self.opt = ng.optimizers.Portfolio(self.param_dict, budget=n_iter*n_jobs, num_workers=n_jobs,)
         with warnings.catch_warnings():#Catch the sinkhorn warnings
             warnings.simplefilter("ignore")
-            for i in np.arange(n_iter):
+            for i in np.arange(n_iter//n_jobs):
 
                 #get the current params
                 param_list = []
                 for n in np.arange(n_jobs):
                     param_list.append(self.opt.ask())
-                
-                
                 #get the current score
                 if self.flexible_transporter:
                     #get the current transporter
                     
-                    score = joblib.Parallel(n_jobs=n_jobs,  prefer="threads", require='sharedmem', verbose=verbose)(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, opt_kwargs=p.value) for p in param_list)
+                    score = joblib.Parallel(n_jobs=n_jobs,  prefer="threads", require='sharedmem', verbose=verbose - 1)(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, opt_kwargs=p.value) for p in param_list)
                 else:
                     transporter = self.inittransporter
-                    score = joblib.Parallel(n_jobs=n_jobs,  prefer="threads", require='sharedmem', mmap_mode=None, verbose=verbose)(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, transporter=transporter, opt_kwargs=p.value) for p in param_list)
+                    score = joblib.Parallel(n_jobs=n_jobs,  prefer="threads", require='sharedmem', verbose=verbose -1)(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, transporter=transporter, opt_kwargs=p.value) for p in param_list)
                 #update the nevergrad params
                 for p, e in zip(param_list, score):
                     self.opt.tell(p, e)
                 #self.opt.tell(params, score)
-                if verbose:
-                    print('iteration: ', i, 'score: ', np.amin(score))
+                if verbose>0:
+                    #print(f"iteration {i+1}/{n_iter} best score: {np.amin(score)}")
+                    logger.info(f"iteration {(i+1)*n_jobs}/{n_iter} best score: {np.amin(score)}")
         #get the best transporter
         print("best kwargs:")
         best_args = self.opt.recommend().value
@@ -220,7 +243,7 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
         return transporter, getValidKwargs(transporter, kwargs)
 
 
-    def init_param_dict(self, Xt, Xs, method, error_func):
+    def init_param_dict(self, Xt, Xs, method, error_func, supervised):
         """Initialize the param dict for the nevergrad optimizer
 
         Args:
@@ -233,8 +256,9 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
             dict: _description_
         """        
         #DEFAULTS
-        methods = [ot.da.UnbalancedSinkhornTransport, ot.da.SinkhornTransport, ot.da.EMDTransport, ot.da.EMDLaplaceTransport]
-        
+        unsupervised_methods = [ot.da.UnbalancedSinkhornTransport, ot.da.SinkhornTransport, ot.da.EMDTransport, ot.da.EMDLaplaceTransport]
+        supervised_methods = [ot.da.SinkhornL1l2Transport, ot.da.SinkhornTransport, ot.da.EMDTransport, ot.da.SinkhornLpl1Transport]
+        methods = supervised_methods if supervised else unsupervised_methods
         #update the defaults similiarity params to max of the two datasets
         DEFAULT_OPTIMIZABLE_KWARGS.update({'similarity_param':ng.p.Scalar(lower=2, upper=np.amin([Xt.shape[0], Xs.shape[0]]))})
 
@@ -261,10 +285,10 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
                 raise NotImplementedError("Bidirectional tuning not implemented yet for a specific transporter")
                 
         elif method == 'unidirectional':
-            options = [ng.p.Dict(**getOptimizableKwargs(x)) for x in methods]
             #if the user wants unidirectional tune
             if self.flexible_transporter:
-                 _param_dict = ng.p.Choice(options)
+                options = [ng.p.Dict(**getOptimizableKwargs(x)) for x in methods]
+                _param_dict = ng.p.Choice(options)
             else:
                 #we want to figure out what params go with what transporter
                 _param_dict = ng.p.Dict(**getOptimizableKwargs(self.inittransporter))
@@ -276,22 +300,26 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
 #UTIL FUNCTIONS
 
 ##From https://stackoverflow.com/a/35139284
-def timeout(max_timeout):
+def timeout():
     """Timeout decorator, parameter in seconds."""
     def timeout_decorator(item):
         """Wrap the original function."""
         @functools.wraps(item)
         def func_wrapper(*args, **kwargs):
             """Closure for function."""
+            if TIMEOUT is None:
+                # no timeout, just call the function
+                return item(*args, **kwargs)
             pool = multiprocessing.pool.ThreadPool(processes=1)
             async_result = pool.apply_async(item, args, kwargs)
             # raises a TimeoutError if execution exceeds max_timeout
             try:
-                res = async_result.get(max_timeout)
+                res = async_result.get(TIMEOUT)
             except multiprocessing.TimeoutError:
                 res = 999999
                 pool.terminate()
                 pool.close()
+                logger.debug(f"Process timed out after {TIMEOUT} seconds")
             pool.terminate()
             pool.close()
             return res
@@ -326,8 +354,7 @@ def getOptimizableKwargs(func, optimizableKwargs=DEFAULT_OPTIMIZABLE_KWARGS):
 
         
 
-
-@timeout(TIMEOUT) #timeout after 5 minutes
+@timeout() #timeout after 5 minutes
 def _inner_tune_back_and_forth(Xs, Xt, Ys, Yt, transporter=ot.da.SinkhornTransport, sample_size=None,  
 error_func=None, verbose=False, opt_kwargs={},):
     """Inner function for tuning the transporter. This method attempts to find the optimization parameters for the transporter.
@@ -414,8 +441,8 @@ error_func=None, verbose=False, opt_kwargs={},):
 
     return error
 
-@timeout(300)
-def _tune_transporter(Xs, Xt, Ys, Yt, transporter=ot.da.SinkhornTransport,  error_func=None, opt_kwargs={},):
+@timeout()
+def _tune_transporter(Xs, Xt, Ys, Yt, transporter=ot.da.SinkhornTransport,  error_func=None, opt_kwargs={}, subsample=False, label_mask=True):
     """_summary_
 
     Args:
@@ -438,14 +465,17 @@ def _tune_transporter(Xs, Xt, Ys, Yt, transporter=ot.da.SinkhornTransport,  erro
         transporter = opt_kwargs.pop('transporter')
 
     if error_func is None:
-        error_func = ugw_dist
+        error_func = gw_dist
+
+    data = prepare_data(Xs, Xt, Ys, Yt, subsample=subsample, label_mask=label_mask)
+
     #print("Tuning the transporter")
     #simply transport
     transporter_ = transporter(**getValidKwargs(transporter, opt_kwargs), log=True)
     #fit the transporter
-    transporter_.fit(Xs=Xs, Xt=Xt)
+    transporter_.fit(Xs=Xs, Xt=Xt, ys=Ys, yt=Yt)
     #transform the data
-    Xs_transport = transporter_.fit_transform(Xs=Xs, Xt=Xt)
+    Xs_transport = transporter_.fit_transform(Xs=Xs, Xt=Xt, ys=Ys, yt=Yt)
     #check the error
     error = error_func(Xs_transport, Xt, Ys, Yt)
     #Check for erros in fitting
@@ -455,7 +485,7 @@ def _tune_transporter(Xs, Xt, Ys, Yt, transporter=ot.da.SinkhornTransport,  erro
     elif np.all(Xs_transport==0):
         error = 9e5
     #also try one final transport of the whole data
-    transporter_.fit(Xs=Xs, Xt=Xt)
+    #transporter_.fit(Xs=Xs, Xt=Xt)
     #check the log
     if 'warning' in transporter_.log_:
         #if there is a warning it is an integration error, despite low recorded error the result is funky so just punish the error term
@@ -464,16 +494,78 @@ def _tune_transporter(Xs, Xt, Ys, Yt, transporter=ot.da.SinkhornTransport,  erro
     return error 
 
 
+def prepare_data(Xs, Xt, Ys, Yt, subsample=False, label_mask=False, sample_size=None, mask_size=0.5):
+    """
+    Prepare the data for OTDA. In this case we will mask the labels and/or subsample the data. 
+    Masking the labels is useful for supervised tuning, where we want to see how the transporter performs when the labels are not available.
+    Subsampling is useful for supervised tuning, where we want to see how the transporter performs when the data is not fully available.
+    takes:
+        Xs: source data
+        Xt: target data
+        Ys: source labels
+        Yt: target labels
+        subsample: whether to subsample the data
+        label_mask: whether to mask the labels
+        sample_size: the size of the sample to take
+        mask_size: the size of the mask
+    returns:
+        data: a dictionary containing the data, with the masked labels ('Ys_mask', 'Yt_mask') 
+        and the subsampled data ('Xs_sample', 'Xt_sample', 'Ys_sample', 'Yt_sample'
+
+    """
+    #prepare the data for the OTDA
+    #mask the labels
+    data = {'Xs':Xs, 'Xt':Xt, 'Ys':Ys, 'Yt':Yt}
+    #only copy the data if we are going to mask it
+    if label_mask or subsample:
+        Xs = Xs.copy()
+        Xt = Xt.copy()
+        Yt = Yt.copy() if Yt is not None else None
+        Ys = Ys.copy() if Ys is not None else None
+    if label_mask:
+        #generate a mask for the labels
+        if Ys is not None:
+            mask = np.random.choice([True, False], size=Ys.shape, p=[mask_size, 1-mask_size])
+            Ys[mask] = -1
+            data['Ys_mask'] = Ys
+        else:
+            data['Ys_mask'] = None
+        if Yt is not None:
+            mask = np.random.choice([True, False], size=Yt.shape, p=[mask_size, 1-mask_size])
+            Yt[mask] = -1
+            data['Yt_mask'] = Yt
+        else:
+            data['Yt_mask'] = None
+    #in some cases we may want to sample the data, primairly in supervised learning
+    if subsample==True:
+        if sample_size is None:
+            #make it the same ratio of Xs and Xt
+            sample_size = np.clip(Xs.shape[0]/Xt.shape[0], 0.1, 0.5) #at least 1 sample, at most half of the smaller one
+
+        rand_idx = np.random.choice(np.arange(Xt.shape[0]), replace=False)
+        Xt_sample = Xt[rand_idx, :]
+        Yt_sample = Yt[rand_idx] if Yt is not None else None
+
+        rand_idx = np.random.choice(np.arange(Xs.shape[0]), replace=False)
+        Xs_sample = Xs[rand_idx, :]
+        Ys_sample = Ys[rand_idx] if Ys is not None else None
+        data['Xs_sample'] = Xs_sample
+        data['Xt_sample'] = Xt_sample
+        data['Ys_sample'] = Ys_sample
+        data['Yt_sample'] = Yt_sample
+    return data
+
+
 ##ERROR FUNCTIONS
 
-def normalized_mse(x,y):
+def normalized_mse(x,y, yx, yy):
     #normalize based on column mean https://www.mathworks.com/help/ident/ref/goodnessoffit.html#d123e47621
     x_mean = np.mean(x, axis=0)
     x_std = np.std(x, axis=0)
     mse = ((x-y)**2)/((x - x_mean)**2)
     return np.nanmean(mse)
 
-def rowwise_mse(x, y):
+def rowwise_mse(x, y, yx, yy):
     return np.mean(np.square(x-y))
 
 def mape(x, y):
@@ -489,10 +581,13 @@ def gw_dist(Xs, Xt, Ys, Yt):
     C2 /= C2.max()
     p = ot.unif(Xs.shape[0])
     q = ot.unif(Xt.shape[0])
-    gw, log = ot.gromov.gromov_wasserstein(
-        C1, C2, p, q, loss_fun='kl_loss', log=True, verbose=False)
+
+    #estimate the cost matrix 
+
+    log = ot.solve_gromov(
+        C1, C2, a=p, b=q, verbose=False, n_threads=5)
         
-    return log['gw_dist']
+    return log.value
 
 def ugw_dist(Xs, Xt, Ys, Yt):
     
@@ -582,16 +677,12 @@ class dummyScaler(sklearn.preprocessing.StandardScaler):
 #TODO: add a check for the number of samples in each set
 class unbalancedFUGWTransporter(BaseTransport):
     def __init__(self, reg_e=0.1, reg_m1=0.1, reg_m2=0.1, 
-                 max_iter=10, tol=1e-9, verbose=False, log=False,
+                 max_iter=10, tol=1e-6, verbose=False, log=False,
                  metric="sqeuclidean", norm=None,
                  distribution_estimation=distribution_estimation_uniform,
                  out_of_sample_map='ferradans', limit_max=10) -> None:
         super().__init__()
-        self.log_ = {}
-        self.log_['warning'] = None
-        self.log_['error'] = None
-        self.log_['error_type'] = None
-        self.log_['error_message'] = None
+        self.log_ = {'warning': None, 'error': None, 'error_type': None, 'error_message': None}
         self.reg_e = reg_e
         self.reg_m1 = reg_m1
         self.reg_m2 = reg_m2
@@ -602,11 +693,13 @@ class unbalancedFUGWTransporter(BaseTransport):
         self.metric = metric
         if norm is None or norm == "median":
            # self.norm = np.median
-            self.norm = norm
+            self.norm = None
         else:
             print("norm must be None or 'median for unbalancedFUGWTransporter'")
             print("setting norm to None")
             self.norm = None
+
+        
 
         self.distribution_estimation = distribution_estimation
         self.out_of_sample_map = out_of_sample_map

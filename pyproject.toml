@@ -12,3 +12,6 @@ dependencies = ["POT",
 "matplotlib",
 "nevergrad"]
 
+[tool.setuptools.package-data]
+patchOTDA = ["*.pkl"]
+
