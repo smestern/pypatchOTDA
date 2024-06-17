@@ -1,4 +1,4 @@
-from skada import JDOTRegressor, JDOTClassifier
+from skada import JDOTRegressor, JDOTClassifier, CORAL, CORALAdapter
 from skada import (
     OTMapping,
     EntropicOTMappingAdapter,
@@ -7,7 +7,9 @@ from skada import (
     make_da_pipeline,
 )
 import numpy as np
+from skada import source_target_split
 from ot.backend import get_backend
+from ot import dist
 METHODS = {
     "jdot": JDOTRegressor,
     "jdotc": JDOTClassifier,
@@ -15,6 +17,7 @@ METHODS = {
     "entropicOT": EntropicOTMappingAdapter,
     "classOT": ClassRegularizerOTMappingAdapter,
     "linearOT": LinearOTMappingAdapter,
+    "coral": CORALAdapter,
 
 }
 
@@ -30,7 +33,9 @@ class baseSkada:
         Y = np.concatenate((Ys, Yt), axis=0)
         #make a sample domain label
         domain = np.concatenate((np.ones(Xs.shape[0]), np.ones(Xt.shape[0])*-1), axis=0)
-        self.model.fit(X, Y, domain, **kwargs)
+        Xs_test, Xt_test, Ys_test, Yt_test = source_target_split(X, Y, sample_domain=domain)
+
+        self.model.fit(X, Y, sample_domain=domain, **kwargs)
         self.xt_ = Xt
         self.xs_ = Xs
 
@@ -76,7 +81,8 @@ class baseSkada:
                     transp_Xs.append(transp_Xs_)
 
                 transp_Xs = nx.concatenate(transp_Xs, axis=0)
-            
+        else:
+            transp_Xs = self.model.transform(Xs, **kwargs)
 
 
         return transp_Xs
@@ -100,4 +106,6 @@ class ClassOT(baseSkada):
 class LinearOT(baseSkada):
     model = LinearOTMappingAdapter
 
+class CORALDA(baseSkada):
+    model = CORALAdapter
 
