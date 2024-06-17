@@ -1,4 +1,4 @@
-from skada import JDOTRegressor, JDOTClassifier, CORAL, CORALAdapter
+from skada import JDOTRegressor, JDOTClassifier, CORAL, CORALAdapter, TransferComponentAnalysisAdapter
 from skada import (
     OTMapping,
     EntropicOTMappingAdapter,
@@ -18,6 +18,7 @@ METHODS = {
     "classOT": ClassRegularizerOTMappingAdapter,
     "linearOT": LinearOTMappingAdapter,
     "coral": CORALAdapter,
+    "TCA": TransferComponentAnalysisAdapter
 
 }
 
@@ -33,7 +34,6 @@ class baseSkada:
         Y = np.concatenate((Ys, Yt), axis=0)
         #make a sample domain label
         domain = np.concatenate((np.ones(Xs.shape[0]), np.ones(Xt.shape[0])*-1), axis=0)
-        Xs_test, Xt_test, Ys_test, Yt_test = source_target_split(X, Y, sample_domain=domain)
 
         self.model.fit(X, Y, sample_domain=domain, **kwargs)
         self.xt_ = Xt
@@ -71,7 +71,6 @@ class baseSkada:
                     idx = nx.argmin(D0, axis=1)
 
                     # transport the source samples
-                    transp = self.coupling_ / nx.sum(self.coupling_, axis=1)[:, None]
                     transp = nx.nan_to_num(transp, nan=0, posinf=0, neginf=0)
                     transp_Xs_ = nx.dot(transp, self.xt_)
 
@@ -82,7 +81,7 @@ class baseSkada:
 
                 transp_Xs = nx.concatenate(transp_Xs, axis=0)
         else:
-            transp_Xs = self.model.transform(Xs, **kwargs)
+            transp_Xs = self.model.transform(Xs, sample_domain=np.ones(len(Xs)), allow_source=True, **kwargs)
 
 
         return transp_Xs
@@ -109,3 +108,5 @@ class LinearOT(baseSkada):
 class CORALDA(baseSkada):
     model = CORALAdapter
 
+class TCA(baseSkada):
+    model = TransferComponentAnalysisAdapter
