@@ -17,4 +17,5 @@ patchOTDA = ["*.pkl"]
 
 [tool.setuptools.packages.find]
 where = ["."]  # list of folders that contain the packages (["."] by default)
-include = ["patchOTDA"]
+include = ["patchOTDA",
+    "patchOTDA.*"]  # list of package names to include (["."] by default)
