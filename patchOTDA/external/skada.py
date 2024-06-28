@@ -48,8 +48,9 @@ class baseSkada:
             #we can use the OT mapping to transform the data
             nx = get_backend(Xs)
             plan = self.model.sol_.plan
+            
             transp = plan / nx.sum(plan, axis=1)[:, None]
-
+            self.coupling_ = transp
             # set nans to 0
             transp = nx.nan_to_num(transp, nan=0, posinf=0, neginf=0)
 
