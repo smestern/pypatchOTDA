@@ -15,3 +15,6 @@ dependencies = ["POT",
 [tool.setuptools.package-data]
 patchOTDA = ["*.pkl"]
 
+[tool.setuptools.packages.find]
+where = ["."]  # list of folders that contain the packages (["."] by default)
+include = ["patchOTDA"]
