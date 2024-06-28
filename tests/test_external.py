@@ -95,6 +95,18 @@ def test_skada():
 
 
 
+def test_ub_sink():
+    import ot
+    from ot.datasets import make_2D_samples_gauss
+    OT = ot.da.UnbalancedSinkhornTransport()
+    Xs = make_2D_samples_gauss(n=1000, m=10, sigma=[[2, 1], [1, 2]], random_state=42)
+    Xt = make_2D_samples_gauss(n=1000, m=5, sigma=[[2, 1], [1, 2]], random_state=42)
+    Xs = Xs.astype('float32')
+    Xt = Xs + 0.5
+    Xt = Xt.astype('float32')
+    OT.fit(Xs, Xt)
+    OT.transform(Xs)
+    return OT
 
 
 def select_by_col(df, cols):
@@ -115,5 +127,6 @@ def not_select_by_col(df, cols):
 
 
 if __name__ == "__main__":
+    test_ub_sink()
     test_skada()
     #test_uniOTtab_model()

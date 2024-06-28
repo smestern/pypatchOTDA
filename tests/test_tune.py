@@ -1,4 +1,4 @@
-import patchOTDA.domain_adapt as pOTDA
+import patchOTDA.domainAdapt as pOTDA
 from ot.datasets import make_2D_samples_gauss, make_data_classif
 import numpy as np
 import cProfile
@@ -43,7 +43,7 @@ def test_tune():
 
     p = pOTDA.PatchClampOTDA('SinkhornLpl1Transport', flexible_transporter=False)
 
-    p.tune(Xs=Xs, Xt=Xt, Ys=Ys, Yt=Yt, n_jobs=1, n_iter=20, method="unidirectional", supervised=True, verbose=True)
+    p.tune(Xs=Xs, Xt=Xt, Ys=Ys, Yt=Yt, n_jobs=5, n_iter=2, method="unidirectional", supervised=True, verbose=True)
 
     Xs_shifted = p.fit_transform(Xs, Xt, Ys, Yt)
 
