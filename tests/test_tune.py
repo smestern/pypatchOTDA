@@ -43,7 +43,7 @@ def test_tune():
 
     p = pOTDA.PatchClampOTDA('SinkhornLpl1Transport', flexible_transporter=False)
 
-    p.tune(Xs=Xs, Xt=Xt, Ys=Ys, Yt=Yt, n_jobs=1, n_iter=200, method="unidirectional", supervised=True, verbose=True)
+    p.tune(Xs=Xs, Xt=Xt, Ys=Ys, Yt=Yt, n_jobs=1, n_iter=20, method="unidirectional", supervised=True, verbose=True)
 
     Xs_shifted = p.fit_transform(Xs, Xt, Ys, Yt)
 
@@ -56,6 +56,6 @@ def test_tune():
         
 
 if __name__=="__main__":
-    profile_fund_function()
+    #profile_fund_function()
     test_tune_unsuper()
     print("test_tune passed")
