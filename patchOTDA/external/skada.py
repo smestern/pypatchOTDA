@@ -1,29 +1,44 @@
-from skada import JDOTRegressor, JDOTClassifier, CORAL, CORALAdapter, TransferComponentAnalysisAdapter
-from skada import (
-    OTMapping,
-    EntropicOTMappingAdapter,
-    ClassRegularizerOTMappingAdapter,
-    LinearOTMappingAdapter,
-    make_da_pipeline,
-)
+"""Wrappers around scikit-adaptation (skada) methods for the patchOTDA API.
+
+All classes follow the ``fit(Xs, Xt, Ys, Yt)`` / ``transform(Xs)`` pattern.
+Requires the ``skada`` package to be installed.
+"""
+import logging
+
+logger = logging.getLogger(__name__)
+
+try:
+    from skada import JDOTRegressor, JDOTClassifier, CORAL, CORALAdapter, TransferComponentAnalysisAdapter
+    from skada import (
+        OTMapping as _OTMapping,
+        EntropicOTMappingAdapter,
+        ClassRegularizerOTMappingAdapter,
+        LinearOTMappingAdapter,
+        make_da_pipeline,
+    )
+    from skada import source_target_split
+except ImportError:
+    logger.warning("skada not installed, external.skada wrappers will not work")
+    raise
+
 import numpy as np
-from skada import source_target_split
 from ot.backend import get_backend
 from ot import dist
+
 METHODS = {
     "jdot": JDOTRegressor,
     "jdotc": JDOTClassifier,
-    "otmapping": OTMapping,
+    "otmapping": _OTMapping,
     "entropicOT": EntropicOTMappingAdapter,
     "classOT": ClassRegularizerOTMappingAdapter,
     "linearOT": LinearOTMappingAdapter,
     "coral": CORALAdapter,
     "TCA": TransferComponentAnalysisAdapter
-
 }
 
 
 class baseSkada:
+    """Base class wrapping skada adapters into the patchOTDA fit/transform API."""
     def __init__(self, **kwargs):
         self.model =  self.model(**kwargs)
         self.kwargs = kwargs
@@ -89,24 +104,31 @@ class baseSkada:
     
 #make a class for each method
 class JDOT(baseSkada):
+    """Joint Distribution OT regressor wrapper."""
     model = JDOTRegressor
 
 class JDOTC(baseSkada):
+    """Joint Distribution OT classifier wrapper."""
     model = JDOTClassifier
 
 class OTMapping(baseSkada):
-    model = OTMapping
+    """OT mapping transport wrapper."""
+    model = _OTMapping
 
 class EntropicOT(baseSkada):
+    """Entropic OT mapping adapter wrapper."""
     model = EntropicOTMappingAdapter
 
 class ClassOT(baseSkada):
+    """Class-regularized OT mapping adapter wrapper."""
     model = ClassRegularizerOTMappingAdapter
 
 class LinearOT(baseSkada):
+    """Linear OT mapping adapter wrapper."""
     model = LinearOTMappingAdapter
 
 class CORALDA(baseSkada):
+    """CORAL domain adaptation wrapper."""
     model = CORALAdapter
 
 class TCA(baseSkada):

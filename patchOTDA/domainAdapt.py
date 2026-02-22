@@ -28,27 +28,22 @@ logger.setLevel(logging.INFO)
 #optional imports
 try:
     import torch
-except:
+except ImportError:
     logging.warning("torch not installed, unbalancedFUGWTransporter will not work")
 
 try:
     from unbalancedgw.vanilla_ugw_solver import exp_ugw_sinkhorn, log_ugw_sinkhorn
     from unbalancedgw._vanilla_utils import ugw_cost
-except:
+except ImportError:
     logging.warning("unbalancedgw not installed, unbalancedFUGWTransporter will not work")
     
 MAX_ITER = int(1e3)
 MAX_INNER_ITER = int(1e5)
 TIMEOUT = 60*2
 
-_reg1_forward = ng.p.Log(lower=1e-9, upper=10)
-_reg1_backward = ng.p.Log(lower=1e-9, upper=10)
-_reg2_forward = ng.p.Log(lower=1e-9, upper=10)
-_reg2_backward = ng.p.Log(lower=1e-9, upper=10)
-_limit_max = ng.p.Log(lower=1, upper=10)
-_norm = ng.p.Choice(['max', 'median', None])
-_metric = ng.p.Choice(['sqeuclidean', 'seuclidean', 'euclidean', 'cosine', 'cityblock', 'minkowski', 'correlation'])
-_semi_super = ng.p.Choice([False, False])
+# Sentinel value returned for degenerate/failed solutions during tuning.
+# Use this constant instead of magic numbers throughout.
+PENALTY_SENTINEL = 9e5
 DEFAULT_OPTIMIZABLE_KWARGS = {'reg': ng.p.Log(lower=1e-10, upper=1), 
 'metric':ng.p.Choice(['sqeuclidean','euclidean']) , 
 
@@ -209,10 +204,10 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
                 if self.flexible_transporter:
                     #get the current transporter
                     
-                    score = joblib.Parallel(n_jobs=n_jobs,  prefer="threads", require='sharedmem', verbose=verbose - 1)(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, opt_kwargs=p.value) for p in param_list)
+                    score = joblib.Parallel(n_jobs=n_jobs,  prefer="threads", require='sharedmem', verbose=max(int(verbose) - 1, 0))(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, opt_kwargs=p.value) for p in param_list)
                 else:
                     transporter = self.inittransporter
-                    score = joblib.Parallel(n_jobs=n_jobs,  prefer="threads", require='sharedmem', verbose=verbose -1)(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, transporter=transporter, opt_kwargs=p.value) for p in param_list)
+                    score = joblib.Parallel(n_jobs=n_jobs,  prefer="threads", require='sharedmem', verbose=max(int(verbose) -1, 0))(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, transporter=transporter, opt_kwargs=p.value) for p in param_list)
                 #update the nevergrad params
                 for p, e in zip(param_list, score):
                     self.opt.tell(p, e)
@@ -221,9 +216,9 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
                     #print(f"iteration {i+1}/{n_iter} best score: {np.amin(score)}")
                     logger.info(f"iteration {(i+1)*n_jobs}/{n_iter} best score: {np.amin(score)}")
         #get the best transporter
-        print("best kwargs:")
+        logger.info("best kwargs:")
         best_args = self.opt.recommend().value
-        print(best_args)
+        logger.info(best_args)
         transporter, best_kwargs = self._to_kwarg_dict(self.inittransporter, kwargs=copy.copy(best_args), direction=direction)
         self.transporter = transporter(**best_kwargs,  log=True)
         self.best_ = best_kwargs
@@ -316,7 +311,7 @@ def timeout():
             try:
                 res = async_result.get(TIMEOUT)
             except multiprocessing.TimeoutError:
-                res = 999999
+                res = PENALTY_SENTINEL
                 pool.terminate()
                 pool.close()
                 logger.debug(f"Process timed out after {TIMEOUT} seconds")
@@ -356,7 +351,7 @@ def getOptimizableKwargs(func, optimizableKwargs=DEFAULT_OPTIMIZABLE_KWARGS):
 
 @timeout() #timeout after 5 minutes
 def _inner_tune_back_and_forth(Xs, Xt, Ys, Yt, transporter=ot.da.SinkhornTransport, sample_size=None,  
-error_func=None, verbose=False, opt_kwargs={},):
+error_func=None, verbose=False, opt_kwargs=None,):
     """Inner function for tuning the transporter. This method attempts to find the optimization parameters for the transporter.
     First it tries to find the best parameters for the forward direction, transporting a random sample of the target to the source.
     then tries to find the best parameters for the backward direction, transporting that random sample back to the target.
@@ -384,6 +379,8 @@ error_func=None, verbose=False, opt_kwargs={},):
     #pull out the forward and backward kwargs, the forward kwargs will have _forward affixed to the end of the key
     #the backward kwargs will have _backward affixed to the end of the key
     #we will use these to update the transporter kwargs
+    if opt_kwargs is None:
+        opt_kwargs = {}
     forward_kwargs = {k[:k.find('_forward')]:v for k,v in opt_kwargs.items() if '_forward' in k}
     backward_kwargs = {k[:k.find('_backward')]:v for k,v in opt_kwargs.items() if '_backward' in k}
     
@@ -423,11 +420,11 @@ error_func=None, verbose=False, opt_kwargs={},):
     error = error_func(Xt_sample, Xt_reconstructed)
     #Check for erros in fitting
     if np.all(np.isnan(Xt_transport)) or np.all(np.isnan(Xt_reconstructed)):
-        error = 9*1e5
+        error = PENALTY_SENTINEL
     elif np.all(Xt_reconstructed==0):
-        error = 9*1e5
+        error = PENALTY_SENTINEL
     elif np.all(Xt_transport==0):
-        error = 9*1e5
+        error = PENALTY_SENTINEL
 
     #also try one final transport of the whole data
     transporter_three = transporter(**getValidKwargs(transporter, backward_kwargs), log=True)
@@ -437,12 +434,12 @@ error_func=None, verbose=False, opt_kwargs={},):
     #check the log
     if 'warning' in transporter_one.log_:
         if (transporter_one.log_['warning'] is not None) or (transporter_two.log_['warning'] is not None) or (transporter_three.log_['warning'] is not None):
-            error = 9*1e5
+            error = PENALTY_SENTINEL
 
     return error
 
 @timeout()
-def _tune_transporter(Xs, Xt, Ys, Yt, transporter=ot.da.SinkhornTransport,  error_func=None, opt_kwargs={}, subsample=False, label_mask=True):
+def _tune_transporter(Xs, Xt, Ys, Yt, transporter=ot.da.SinkhornTransport,  error_func=None, opt_kwargs=None, subsample=False, label_mask=True):
     """_summary_
 
     Args:
@@ -461,6 +458,8 @@ def _tune_transporter(Xs, Xt, Ys, Yt, transporter=ot.da.SinkhornTransport,  erro
         verbose (bool, optional): _description_. Defaults to False.
     """
     #print("Tuning the transporter")
+    if opt_kwargs is None:
+        opt_kwargs = {}
     if 'transporter' in list(opt_kwargs.keys()):
         transporter = opt_kwargs.pop('transporter')
 
@@ -481,16 +480,16 @@ def _tune_transporter(Xs, Xt, Ys, Yt, transporter=ot.da.SinkhornTransport,  erro
     #Check for erros in fitting
 
     if np.all(np.isnan(Xs_transport)):
-        error = 9e5
+        error = PENALTY_SENTINEL
     elif np.all(Xs_transport==0):
-        error = 9e5
+        error = PENALTY_SENTINEL
     #also try one final transport of the whole data
     #transporter_.fit(Xs=Xs, Xt=Xt)
     #check the log
     if 'warning' in transporter_.log_:
         #if there is a warning it is an integration error, despite low recorded error the result is funky so just punish the error term
         if transporter_.log_['warning'] is not None:
-            error = 9*1e5
+            error = PENALTY_SENTINEL
     return error 
 
 
@@ -695,8 +694,8 @@ class unbalancedFUGWTransporter(BaseTransport):
            # self.norm = np.median
             self.norm = None
         else:
-            print("norm must be None or 'median for unbalancedFUGWTransporter'")
-            print("setting norm to None")
+            logger.warning("norm must be None or 'median for unbalancedFUGWTransporter'")
+            logger.warning("setting norm to None")
             self.norm = None
 
         
@@ -744,9 +743,8 @@ class unbalancedFUGWTransporter(BaseTransport):
                     eps=self.reg_e, rho=self.reg_m1, rho2=self.reg_m2, 
                     nits_sinkhorn=self.max_iter, tol_sinkhorn=self.tol), dict())
             except Exception as e:
-                print(e)
-                print("error in log_ugw_sinkhorn")
-                print("setting coupling matrix to ones")
+                logger.error(f"error in log_ugw_sinkhorn: {e}")
+                logger.error("setting coupling matrix to ones")
                 self.coupling_ = torch.ones(Xs.shape[0], Xt.shape[0], dtype=torch.float64)
                 returned_ = (self.coupling_, dict())
             
@@ -769,288 +767,3 @@ class unbalancedFUGWTransporter(BaseTransport):
             #pass to super
             return super(unbalancedFUGWTransporter, self).transform(Xs, ys, Xt, yt).numpy()
 
-
-
-
-# def tune_grad_descent(self, Xs, Xt, Ys=None, Yt=None, n_iter=500, verbose=True):
-#         #for certain methods, we can use gradient descent to find the best params
-        
-#         #put our data into torch
-#         Xs = torch.from_numpy(Xs).float()
-#         Xt = torch.from_numpy(Xt).float()
-
-#         dist_x1 = torch.ones(Xt.shape[0]).float() / Xt.shape[0]
-#         dist_x2 = torch.ones(Xs.shape[0]).float() / Xs.shape[0]
-
-#         dist_x1.requires_grad = True
-#         dist_x2.requires_grad = True
-
-#         #grab a random sample
-#         idx = np.random.randint(0, Xs.shape[0], int(Xt.shape[0]*0.1))
-#         Xt_sample = Xt[idx]
-#         dist_x2_sample = torch.ones(Xt_sample.shape[0]).float() / Xt_sample.shape[0]
-#         dist_x2_sample.requires_grad = True
-#         #init our regularizing params as parmeters for torch
-#         reg1 = torch.nn.Parameter(torch.tensor(float(1)).float(), requires_grad=True)
-#         reg2 = torch.nn.Parameter(torch.tensor(float(1)).float(), requires_grad=True)
-#         #reg2 = torch.nn.Parameter(torch.tensor(self._kwargs['reg2']))
-
-#         #init our transporter sinkhorn is the only supported method afaik
-
-#         #self.transporter = EMDLaplaceTransport(reg_src=reg)
-
-#         #init our optimizer
-#         self.opt = torch.optim.Adam([reg1, reg2], lr=0.1)
-
-#         self.lr_sch = torch.optim.lr_scheduler.ExponentialLR(self.opt, 0.99)
-#         #init our loss function
-#         self.loss_fn = torch.nn.MSELoss()
-#         reg_history = []
-#         state_history = []
-#         #iter through the gradient descent
-#         for i in np.arange(n_iter):
-#             self.opt.zero_grad()
-#             reg_history.append([np.copy(reg1.detach().numpy()), np.copy(reg2.detach().numpy())])
-#             state_history.append(self.opt.state_dict())
-#             #reinit the transporter with the new regularization
-#             cost_matrix = ot.dist(Xt_sample, Xs)
-#             #normalize cost matrix by max
-#             cost_matrix = cost_matrix / torch.max(cost_matrix)
-
-#             transp_map = ot.bregman.sinkhorn(dist_x2_sample, dist_x2, M=cost_matrix, reg=torch.pow(10,reg1), verbose=False)
-#             #transport it back to the source
-#             # perform standard barycentric mapping
-#             transp = transp_map / torch.sum(transp_map, 1)[:, None]
-
-#             # set nans to 0
-#             transp[~ torch.isfinite(transp)] = 0
-
-#             # compute transported samples
-#             Xt_forward = torch.matmul(transp, Xs)
-
-#             #transport it back to target
-#             cost_matrix2 = ot.dist(Xt_forward, Xt)
-#             #normalize cost matrix by max
-#             cost_matrix2 = cost_matrix2 / torch.max(cost_matrix2)
-#             transp_map2 = ot.bregman.sinkhorn(dist_x2_sample, dist_x1, M=cost_matrix2, reg=torch.pow(10,reg2), verbose=False)
-#             #transport it back to the source
-#             # perform standard barycentric mapping
-#             transp2 = transp_map2 / torch.sum(transp_map2, 1)[:, None]
-
-
-#             # set nans to 0
-#             transp2[~ torch.isfinite(transp2)] = 0
-
-#             # compute transported samples
-#             Xt_backward = torch.matmul(transp2, Xt)
-#             #compute the loss
-#             loss = self.loss_fn(Xt_backward, Xt_sample)
-#             #compute the gradient
-#             #loss = torch.trace(torch.mm(transp2, cost_matrix2.T))
-#             loss.backward()
-#             #check if grad is nan and if so set to 0
-#             # if torch.isnan(reg1.grad).any():
-#             #     reg1.grad.zero_()
-#             # if torch.isnan(reg2.grad).any():
-                
-#             #     reg2.grad.zero_()
-#             #clip the gradient
-#             torch.nn.utils.clip_grad_value_([reg1, reg2], 0.1)
-#             #update the params
-#             self.opt.step()
-#             with torch.no_grad():
-#                 if verbose:
-#                     #reg.backward()
-#                     plt.clf()
-#                     xt_sample_np = Xt_sample.detach().numpy()
-#                     plt.scatter(xt_sample_np[:, 0], xt_sample_np[:, 1], c='r', s=1)
-#                     plt.scatter(Xt_backward.detach().numpy()[:, 0], Xt_backward.detach().numpy()[:, 1], c='b', s=1)
-#                     plt.pause(0.100)
-#                     print('iteration: ', i, 'loss: ', loss.item(), 'reg1: ', reg1.detach().numpy(), 'reg2: ', reg2.detach().numpy(), 'lr: ', self.lr_sch.get_lr())
-#                     #if the reg becomes nan we want to reset and try again
-
-#                     if (np.isnan(reg1.detach().numpy()) or np.isnan(reg2.detach().numpy())):
-#                         #reinit the reg params
-#                         self.lr_sch.step()
-#                         #reset the nan reg params
-#                         if np.isnan(reg1.detach().numpy()):
-#                             reg1 = torch.nn.Parameter(torch.tensor(float(reg_history[-2][0])).float(), requires_grad=True)
-#                         if np.isnan(reg2.detach().numpy()):
-#                             reg2 = torch.nn.Parameter(torch.tensor(float(reg_history[-2][1])).float(), requires_grad=True)
-#                         self.opt = torch.optim.Adam([reg1, reg2], lr=self.lr_sch.get_lr()[0])
-#                         print('reset reg')
-#                         if self.lr_sch.get_lr()[0] < 1e-9:
-#                             self.opt = torch.optim.Adam([reg1, reg2], lr=1)
-#                             self.lr_sch = torch.optim.lr_scheduler.ExponentialLR(self.opt, 0.7)
-#                         else:
-#                             self.opt = torch.optim.Adam([reg1, reg2], lr=self.lr_sch.get_lr()[0])
-#         #once we complete the loop, get the best kwargs and init the transporter
-#         reg_back_numpy = reg_history[-1][1]
-#         #for now directly inst and assign the transporter
-#         self.transporter = ot.da.SinkhornTransport(reg_e=reg_back_numpy)
-
-
-
-
-
-
-
-
-
-
-#  def tune_grad_descent_emp(self, Xs, Xt, Ys=None, Yt=None, n_iter=500, verbose=True):
-#         #for certain methods, we can use gradient descent to find the best params
-        
-#         #put our data into torch
-#         Xs = torch.from_numpy(Xs).float()
-#         Xt = torch.from_numpy(Xt).float()
-
-#         dist_x1 = torch.ones( Xt.shape[0]).float() / Xt.shape[0]
-#         dist_x2 = torch.ones(Xs.shape[0]).float() / Xs.shape[0]
-
-#         dist_x1.requires_grad = True
-#         dist_x2.requires_grad = True
-
-#         #grab a random sample
-#         idx = np.random.randint(0, Xs.shape[0], int(Xt.shape[0]*0.1))
-#         Xt_sample = Xt[idx]
-#         dist_x2_sample = torch.ones(Xt_sample.shape[0]).float() / Xt_sample.shape[0]
-#         dist_x2_sample.requires_grad = True
-#         #init our regularizing params as parmeters for torch
-#         reg1 = torch.nn.Parameter(torch.tensor(float(1)).float(), requires_grad=True)
-#         reg2 = torch.nn.Parameter(torch.tensor(float(1)).float(), requires_grad=True)
-#         #reg2 = torch.nn.Parameter(torch.tensor(self._kwargs['reg2']))
-
-#         #init our transporter sinkhorn is the only supported method afaik
-
-#         #self.transporter = EMDLaplaceTransport(reg_src=reg)
-
-#         #init our optimizer
-#         self.opt = torch.optim.SGD([reg1, reg2], lr=10)
-
-#         self.lr_sch = torch.optim.lr_scheduler.ExponentialLR(self.opt, 0.7)
-#         #init our loss function
-#         self.loss_fn = torch.nn.MSELoss()
-#         reg_history = []
-#         state_history = []
-#         #iter through the gradient descent
-#         for i in np.arange(n_iter):
-#             self.opt.zero_grad()
-#             reg_history.append([np.copy(reg1.detach().numpy()), np.copy(reg2.detach().numpy())])
-#             state_history.append(self.opt.state_dict())
-#             #reinit the transporter with the new regularization
-#             cost_matrix = ot.dist(Xt_sample, Xs)
-#             transp_map = ot.bregman.empirical_sinkhorn(Xt_sample, Xs, reg1, verbose=False)
-#             #transport it back to the source
-#             # perform standard barycentric mapping
-#             transp = transp_map / torch.sum(transp_map, 1)[:, None]
-
-#             # set nans to 0
-#             transp[~ torch.isfinite(transp)] = 0
-
-#             # compute transported samples
-#             Xt_forward = torch.matmul(transp, Xs)
-
-#             #transport it back to target
-#             cost_matrix2 = ot.dist(Xt_forward, Xt)
-#             transp_map2 = ot.bregman.empirical_sinkhorn(Xt_forward, Xt, reg2, verbose=False)
-#             #transport it back to the source
-#             # perform standard barycentric mapping
-#             transp2 = transp_map2 / torch.sum(transp_map2, 1)[:, None]
-
-
-#             # set nans to 0
-#             transp2[~ torch.isfinite(transp2)] = 0
-
-#             # compute transported samples
-#             Xt_backward = torch.matmul(transp2, Xt)
-#             #compute the loss
-#             loss = self.loss_fn(Xt_backward, Xt_sample)
-#             #compute the gradient
-#             #loss = torch.trace(torch.mm(transp2, cost_matrix2.T))
-#             loss.backward()
-#             #update the params
-#             self.opt.step()
-#             with torch.no_grad():
-#                 if verbose:
-#                     #reg.backward()
-#                     plt.clf()
-#                     xt_sample_np = Xt_sample.detach().numpy()
-#                     plt.scatter(xt_sample_np[:, 0], xt_sample_np[:, 1], c='r', s=1)
-#                     plt.scatter(Xt_backward.detach().numpy()[:, 0], Xt_backward.detach().numpy()[:, 1], c='b', s=1)
-#                     plt.pause(0.100)
-#                     print('iteration: ', i, 'loss: ', loss.item(), 'reg1: ', reg1.detach().numpy(), 'reg2: ', reg2.detach().numpy(), 'lr: ', self.lr_sch.get_lr())
-#                     #if the reg becomes nan we want to reset and try again
-#                     if np.isnan(reg1.detach().numpy()):
-#                         #reinit the reg params
-#                         self.lr_sch.step()
-#                         reg1 = torch.nn.Parameter(torch.tensor(float(reg_history[-1][0])).float(), requires_grad=True)
-#                         reg2 = torch.nn.Parameter(torch.tensor(float(reg_history[-1][1])).float(), requires_grad=True)
-
-#                         self.opt = torch.optim.Adam([reg1, reg2], lr=self.lr_sch.get_lr()[0])
-#                         #if lr is really low warm restart the lr scheduler
-#                         if self.lr_sch.get_lr()[0] < 1e-9:
-#                             self.lr_sch = torch.optim.lr_scheduler.ExponentialLR(self.opt, 0.7)
-#                         print('reset reg')
-#                         #self.lr_sch.step()
-#         #get the best transporter
-
-# def _bidirectional_tune(self, Xs, Xt, Ys=None, Yt=None, n_iter=20, n_jobs=-1, verbose=True):
-#         """ Tune the parameters of the OTDA based transporter to the datasets provided.
-#         Tunes the reg parameters and the norm of the data sets. Currently supports using an error function base on
-#         the mse between randomly skewed data and Xt.
-#         Supports paralellism via n_jobs. The total number of points queried is (n_iter x n_jobs)
-#         Uses nevergrad as optimizer backend. TODO// allow user to select optimizer
-
-#         Args:
-#             Xs (numpy array): _description_
-#             Xt (numpy array): _description_
-#             Ys (_type_, optional): _description_. Defaults to None.
-#             Yt (_type_, optional): _description_. Defaults to None.
-#             n_iter (int, optional): _description_. Defaults to 10.
-#             n_jobs (int, optional): _description_. Defaults to -1.
-#             method (str, optional): _description_. Defaults to 'unsuper-multi'.
-#             verbose (bool, optional): _description_. Defaults to True.
-
-#         Returns:
-#             _type_: _description_
-#         """
-
-#         #if the user does not specify just use the default values
-#         if n_jobs == -1:
-#             n_jobs = multiprocessing.cpu_count()
-
-#         #init a nevergrad optimization
-#         self.opt = ng.optimizers.Portfolio(self.param_dict, budget=n_iter*n_jobs, num_workers=n_jobs,)
-#         with warnings.catch_warnings():#Catch the sinkhorn warnings
-#             warnings.simplefilter("ignore")
-#             for i in np.arange(n_iter):
-
-#                 #get the current params
-#                 param_list = []
-#                 for n in np.arange(n_jobs):
-#                     param_list.append(self.opt.ask())
-                
-                
-#                 #get the current score
-#                 if self.flexible_transporter:
-#                     #get the current transporter
-                    
-#                     score = joblib.Parallel(n_jobs=n_jobs,  prefer="threads", require='sharedmem', verbose=100)(joblib.delayed(_inner_tune_back_and_forth)(Xs, Xt, Ys, Yt, opt_kwargs=p.value) for p in param_list)
-#                 else:
-#                     transporter = self.inittransporter
-#                     score = joblib.Parallel(n_jobs=n_jobs,  prefer="threads", require='sharedmem', mmap_mode=None, verbose=100)(joblib.delayed(_inner_tune_back_and_forth)(Xs, Xt, Ys, Yt, transporter=transporter, opt_kwargs=p.value) for p in param_list)
-#                 #update the nevergrad params
-#                 for p, e in zip(param_list, score):
-#                     self.opt.tell(p, e)
-#                 #self.opt.tell(params, score)
-#                 if verbose:
-#                     print('iteration: ', i, 'score: ', np.amin(score))
-#         #get the best transporter
-#         print("best kwargs:")
-#         print(self.opt.recommend().value)
-        
-#         best_kwargs = self._to_kwarg_dict(transporter=None, kwargs=self.opt.recommend().value)
-#         self.transporter = self.inittransporter(**best_kwargs,  log=True)
-#         self.best_ = best_kwargs
-#         return self

@@ -1,61 +1,54 @@
 import patchOTDA.domainAdapt as pOTDA
 from ot.datasets import make_2D_samples_gauss, make_data_classif
 import numpy as np
-import cProfile
+import matplotlib
+matplotlib.use('Agg')  # non-interactive backend for CI
 import matplotlib.pyplot as plt
+import pytest
 
 
-pOTDA.TIMEOUT = None # Disable timeout for testing
-def profile_fund_function():
-    Xs = make_2D_samples_gauss(n=1000, m=(0,0), sigma=np.full((2,2), 0.5))
-    Xt = make_2D_samples_gauss(n=1500, m=(2.5,.5), sigma=np.full((2,2), 3.5))
-    with cProfile.Profile() as pr:
-        pOTDA._tune_transporter(Xs=Xs, Xt=Xt, Ys=None, Yt=None, transporter=pOTDA.unbalancedFUGWTransporter)
-        stats = pr.print_stats(sort='cumtime')
+pOTDA.TIMEOUT = None  # Disable timeout for testing
 
-        print(stats)
-
-    
 
 def test_tune_unsuper():
-    # Create a PatchClampOTDA object
+    """Test unsupervised tuning with synthetic Gaussian data."""
     p = pOTDA.PatchClampOTDA(flexible_transporter=False)
-    #make a dataset
 
-    Xs = make_2D_samples_gauss(n=1000, m=(0,0), sigma=np.array([[1, 0], [0, 1]]))
-    Xt = make_2D_samples_gauss(n=1500, m=(2.5,.5), sigma=np.array([[1, -.8], [-.8, 1]]))
-    
-    p.tune(Xs=Xs, Xt=Xt, n_jobs=10, n_iter=200, method="unidirectional", verbose=True)
+    Xs = make_2D_samples_gauss(n=100, m=(0, 0), sigma=np.array([[1, 0], [0, 1]]))
+    Xt = make_2D_samples_gauss(n=150, m=(2.5, .5), sigma=np.array([[1, -.8], [-.8, 1]]))
 
+    p.tune(Xs=Xs, Xt=Xt, n_jobs=2, n_iter=4, method="unidirectional", verbose=True)
 
     Xs_shifted = p.fit_transform(Xs, Xt)
 
-    plt.scatter(Xs[:,0], Xs[:,1], label="Xs")
-    plt.scatter(Xt[:,0], Xt[:,1], label="Xt")
-    plt.scatter(Xs_shifted[:,0], Xs_shifted[:,1], label="Xs_shifted")
-    plt.legend()
-    #plt.show()
+    # Basic shape checks
+    assert Xs_shifted.shape == Xs.shape, f"Expected shape {Xs.shape}, got {Xs_shifted.shape}"
+    # The shifted data should not be identical to the original
+    assert not np.allclose(Xs_shifted, Xs), "Shifted data should differ from original"
+    # The shifted data should not be all NaN or all zero (degenerate)
+    assert not np.all(np.isnan(Xs_shifted)), "Shifted data should not be all NaN"
+    assert not np.all(Xs_shifted == 0), "Shifted data should not be all zeros"
+    # The shifted data should be closer to Xt than Xs was (in terms of mean)
+    original_dist = np.linalg.norm(Xs.mean(axis=0) - Xt.mean(axis=0))
+    shifted_dist = np.linalg.norm(Xs_shifted.mean(axis=0) - Xt.mean(axis=0))
+    assert shifted_dist < original_dist, (
+        f"Shifted data mean should be closer to target: original_dist={original_dist:.3f}, shifted_dist={shifted_dist:.3f}"
+    )
 
-def test_tune():
-    #test supervised
+
+def test_tune_supervised():
+    """Test supervised tuning with labelled synthetic data."""
     Xs, Ys = make_data_classif(dataset="3gauss", n=100, nz=0.5)
-    Xt, Yt = make_data_classif(dataset="3gauss2", n=1500, nz=0.5)
+    Xt, Yt = make_data_classif(dataset="3gauss2", n=150, nz=0.5)
 
     p = pOTDA.PatchClampOTDA('SinkhornLpl1Transport', flexible_transporter=False)
 
-    p.tune(Xs=Xs, Xt=Xt, Ys=Ys, Yt=Yt, n_jobs=5, n_iter=2, method="unidirectional", supervised=True, verbose=True)
+    p.tune(Xs=Xs, Xt=Xt, Ys=Ys, Yt=Yt, n_jobs=2, n_iter=2, method="unidirectional", supervised=True, verbose=True)
 
     Xs_shifted = p.fit_transform(Xs, Xt, Ys, Yt)
 
-    plt.scatter(Xs[:,0], Xs[:,1], c=Ys, label="Xs", marker="x")
-    plt.scatter(Xt[:,0], Xt[:,1], c=Yt, label="Xt", alpha=0.1)
-    plt.scatter(Xs_shifted[:,0], Xs_shifted[:,1], c=Ys, label="Xs_shifted")
-    plt.legend()
-    plt.show()
-    return True
-        
-
-if __name__=="__main__":
-    #profile_fund_function()
-    test_tune_unsuper()
-    print("test_tune passed")
+    # Basic shape and sanity checks
+    assert Xs_shifted.shape == Xs.shape, f"Expected shape {Xs.shape}, got {Xs_shifted.shape}"
+    assert not np.all(np.isnan(Xs_shifted)), "Shifted data should not be all NaN"
+    assert not np.all(Xs_shifted == 0), "Shifted data should not be all zeros"
+    assert hasattr(p, 'best_'), "Tuned model should have best_ attribute"

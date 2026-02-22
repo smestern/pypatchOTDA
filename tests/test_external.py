@@ -1,140 +1,106 @@
-from patchOTDA.nn import uniOTtab
-import pandas as pd
+"""Tests for external wrappers (skada, UniOTtab).
+
+These tests use synthetic data. Tests that require optional dependencies
+are skipped when those dependencies are not installed.
+"""
 import numpy as np
-from patchOTDA.nn.uniood.configs import parser
-from patchOTDA.external import skada
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import pytest
+
 from ot.datasets import make_2D_samples_gauss, make_data_classif
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
 import ot.da
-from ot.backend import get_backend
-import matplotlib.pyplot as plt
 
-path = "/home/smestern/Downloads/MapMySpikes_data_PUBLIC final.xlsx"
 
-df = pd.read_excel(path, sheet_name="CTKE_M1", index_col=0)
-def test_uniOTtab_dataset():
-    #load the data 
-    df = pd.read_excel(path, sheet_name="CTKE_M1", index_col=0)
+# ---------------------------------------------------------------------------
+# Optional-dependency guards
+# ---------------------------------------------------------------------------
+try:
+    from patchOTDA.external import skada
+    _HAS_SKADA = True
+except ImportError:
+    _HAS_SKADA = False
 
-    features = pd.read_excel(path, sheet_name="Ephys_Features")
-    df_ephys, df_meta = select_by_col(df, features['Parameter name'].values), not_select_by_col(df, features['Parameter name'].values)
-    #create the dataset
-    dataset = uniOTtab.TabularDataset(source_domain=df, target_domain=df, n_share=100, n_source_private=10)
+try:
+    from patchOTDA.nn import uniOTtab
+    from patchOTDA.nn.uniood.configs import parser
+    _HAS_UNIOT = True
+except ImportError:
+    _HAS_UNIOT = False
 
-    pass
 
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not _HAS_UNIOT, reason="torch / uniOTtab not installed")
 def test_uniOTtab_model():
+    """Train UniOTtab on synthetic data and verify predictions are reasonable."""
+    Xs, Ys = make_data_classif(dataset="3gauss", n=500, nz=0.5)
+    Xt, Yt = make_data_classif(dataset="3gauss2", n=500, nz=0.5)
 
-    #args = parser.parse_args()
+    # Shift target domain
+    Xt[:, 0] += 4
+    Xt[:, 1] += 4
 
     model = uniOTtab.UniOTtab()
+    model.fit(Xs, Xt, Ys, Yt, n_share=4, n_source_private=0,
+              num_internal_cluster=4, max_iter=50, base_lr=1e-3)
 
-    #test supervised
-    Xs, Ys = make_data_classif(dataset="3gauss", n=10000, nz=0.5)
-    Xt, Yt = make_data_classif(dataset="3gauss2", n=15000, nz=0.5)
+    preds_target = model.predict(Xt)
+    preds_source = model.predict(Xs)
 
-    #skew the data a bit
-    Xt[:,0] = Xt[:,0] + 4
-    Xt[:,1] = Xt[:,1] + 4
-    #Xs = Xs + np.random.normal(0, 4, Xs.shape)
+    # Predictions should have the right shape
+    assert preds_target.shape == Yt.shape, f"Target pred shape mismatch: {preds_target.shape} vs {Yt.shape}"
+    assert preds_source.shape == Ys.shape, f"Source pred shape mismatch: {preds_source.shape} vs {Ys.shape}"
 
-
-    plt.scatter(Xs[:, 0], Xs[:, 1], c=Ys, marker='x')
-    plt.scatter(Xt[:, 0], Xt[:, 1], c=Yt, alpha=0.01)
-    
-    #make a classification model
-    rf = RandomForestClassifier(n_estimators=100)
-    rf.fit(Xs, Ys)
-    scores = {"source": rf.score(Xs, Ys), "target": rf.score(Xt, Yt)}
+    # Source accuracy should be reasonable (> chance = 1/n_classes)
+    source_acc = accuracy_score(Ys, preds_source)
+    assert source_acc > 0.4, f"Source accuracy too low: {source_acc:.3f}"
 
 
-    model.fit(Xs, Xt, Ys, Yt, n_share=4, n_source_private=0, num_internal_cluster=4, max_iter=150, base_lr=1e-3)
-    out = model.predict(Xt)
-    out2 = model.predict(Xs)
-
-    
-    scores['source_da'] = accuracy_score(Ys, out2)
-    scores['target_da'] = accuracy_score(Yt, out)
-
-    embed = model.transform(Xs)
-    embed2 = model.transform(Xt)
-    plt.figure()
-    plt.scatter( embed2[:, 0],  embed2[:, 1], marker='x', c=Yt)
-    plt.scatter( embed[:, 0],  embed[:, 1], alpha=0.1, c=Ys)
-    #plt.show()
-    print(scores)
-
-    return
-
-
+@pytest.mark.skipif(not _HAS_SKADA, reason="skada not installed")
 def test_skada():
-    jdot = skada.JDOTC(n_iter_max=int(1e4))
-    #test supervised
-    Xs, Ys = make_data_classif(dataset="3gauss", n=1000, nz=0.5)
-    Xt, Yt = make_data_classif(dataset="3gauss2", n=1500, nz=0.5)
+    """Test JDOTC wrapper with synthetic data."""
+    jdot = skada.JDOTC(n_iter_max=int(1e3))
 
-    Xs_train, Xs_test, Ys_train, Ys_test = train_test_split(Xs, Ys, test_size=(100-40)/100, 
-                                                                random_state=42)
-    Xt_train, Xt_test, Yt_train, Yt_test = train_test_split(Xt, Yt, test_size=(100-40)/100, random_state=42)
+    Xs, Ys = make_data_classif(dataset="3gauss", n=200, nz=0.5)
+    Xt, Yt = make_data_classif(dataset="3gauss2", n=300, nz=0.5)
 
+    # Shift target domain
+    Xt[:, 0] += 4
+    Xt[:, 1] += 4
 
-    #skew the data a bit
-    Xt[:,0] = Xt[:,0] + 4
-    Xt[:,1] = Xt[:,1] + 4
-
-    #make a classification model
-    rf = RandomForestClassifier(n_estimators=100)
-    rf.fit(Xs, Ys)
-    scores = {"source": rf.score(Xs, Ys), "target": rf.score(Xt, Yt)}
+    Xs_train, Xs_test, Ys_train, Ys_test = train_test_split(Xs, Ys, test_size=0.6, random_state=42)
+    Xt_train, Xt_test, Yt_train, Yt_test = train_test_split(Xt, Yt, test_size=0.6, random_state=42)
 
     jdot.fit(Xt_test, Xs_train, Yt_test, Ys_train)
-    #out = jdot.predict(Xs)
-    out2 = jdot.predict(Xt)
-    scores['target_da'] = accuracy_score(Yt, out2)
-    embed = jdot.transform(Xt_train +0.6)
-    jdot.transform(Xt)
+    preds = jdot.predict(Xt)
 
-    #plt.scatter( embed2[:, 0],  embed2[:, 1], marker='x', c=Yt)
-    #plt.scatter( embed[:, 0],  embed[:, 1], alpha=0.1, c=Ys)
+    assert preds.shape == Yt.shape, f"Prediction shape mismatch: {preds.shape} vs {Yt.shape}"
 
-    return
-
+    # Transform should return same number of samples
+    transformed = jdot.transform(Xt_train)
+    assert transformed.shape[0] == Xt_train.shape[0], "Transform should preserve sample count"
 
 
 def test_ub_sink():
-    import ot
-    from ot.datasets import make_2D_samples_gauss
+    """Test unbalanced Sinkhorn transport with simple shifted data."""
     OT = ot.da.UnbalancedSinkhornTransport()
-    Xs = make_2D_samples_gauss(n=1000, m=10, sigma=[[2, 1], [1, 2]], random_state=42)
-    Xt = make_2D_samples_gauss(n=1000, m=5, sigma=[[2, 1], [1, 2]], random_state=42)
+    Xs = make_2D_samples_gauss(n=100, m=10, sigma=[[2, 1], [1, 2]], random_state=42)
+    Xt = (Xs + 0.5).astype('float32')
     Xs = Xs.astype('float32')
-    Xt = Xs + 0.5
-    Xt = Xt.astype('float32')
-    OT.fit(Xs, Xt)
-    OT.transform(Xs)
-    return OT
 
+    OT.fit(Xs=Xs, Xt=Xt)
+    Xs_transformed = OT.transform(Xs=Xs, Xt=Xt)
 
-def select_by_col(df, cols):
-    if isinstance(cols, str):
-        cols = [cols]
-    df_cols = df.columns
-    union = np.intersect1d(cols, df_cols)
-    return df[union]
-
-def not_select_by_col(df, cols):
-    if isinstance(cols, str):
-        cols = [cols]
-    df_cols = df.columns
-    set_diff = np.setdiff1d(df_cols, cols)
-    return df[set_diff]
-
-
-
-
-if __name__ == "__main__":
-    #test_ub_sink()
-    test_skada()
-    #test_uniOTtab_model()
+    assert Xs_transformed.shape == Xs.shape, f"Shape mismatch: {Xs_transformed.shape} vs {Xs.shape}"
+    assert not np.all(np.isnan(Xs_transformed)), "Transformed data should not be all NaN"
+    # Transformed data should be closer to target
+    orig_dist = np.linalg.norm(Xs.mean(axis=0) - Xt.mean(axis=0))
+    trans_dist = np.linalg.norm(Xs_transformed.mean(axis=0) - Xt.mean(axis=0))
+    assert trans_dist < orig_dist, "Transformed data should be closer to target"

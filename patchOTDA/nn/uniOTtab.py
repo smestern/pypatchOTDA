@@ -3,6 +3,9 @@
 ## github.com/zhmiao/uniood/
 
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 import torch
 from .uniood.datasets.benchmark import MultiDomainsBenchmark, read_split_from_txt
@@ -147,11 +150,11 @@ class uniOTtabModel(UniDaTrainer):
         
         if (cfg.fixed_backbone or cfg.ft_last_layer) and os.path.exists(source_feature_path) and os.path.exists(target_feature_path):
             self.use_features = True
-            print('Use pretrained features as dataloader')
+            logger.info('Use pretrained features as dataloader')
             cfg.num_workers = 0
         else:
             self.use_features = False
-            print('Use raw as dataloader')
+            logger.info('Use raw as dataloader')
             source_feature_path = None
             target_feature_path = None
 

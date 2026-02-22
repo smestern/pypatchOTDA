@@ -1,9 +1,13 @@
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
+
 try:
     import h5py
-    ##Does not import when using python-matlab interface on windows machines
-except:
-    print("h5py import fail")
+except ImportError:
+    logger.warning("h5py not installed, NWB loading will not work")
+
 import pandas as pd
 
 
@@ -28,10 +32,8 @@ def loadNWB(file_path, return_obj=False, old=False):
     else:
         nwb = nwbFile(file_path)
     
-    fs_dict = 50000 #nwb.rate # sampling rate info
-    fs = 50000#fs_dict["rate"] # assumes units of Hz
-    dt = np.reciprocal(fs) # seconds
-    
+    dt = np.reciprocal(float(nwb.rate))  # seconds, using actual sampling rate from file
+
     if isinstance(nwb.dataX, np.ndarray)==False:
         dataX = np.asarray(nwb.dataX, dtype=np.dtype('O')) ##Assumes if they are still lists its due to uneven size
         dataY = np.asarray(nwb.dataY, dtype=np.dtype('O')) #Casts them as numpy object types to deal with this
@@ -41,31 +43,26 @@ def loadNWB(file_path, return_obj=False, old=False):
         dataY = nwb.dataY
         dataC = nwb.dataC
 
-    if return_obj == True:
+    if return_obj:
         return dataX, dataY, dataC, dt, nwb
     else:
         return dataX, dataY, dataC, dt
-
-    ##Final return incase if statement fails somehow
-    return dataX, dataY, dataC, dt
-
 
 
 # A simple class to load the nwb data quick and easy
 ##Call like nwb = nwbfile('test.nwb')
 ##Sweep data is then located at nwb.dataX, nwb.dataY, nwb.dataC (for stim)
 class old_nwbFile(object):
+    """Loads NWB files using the older acquisition key layout (no 'timeseries' subgroup)."""
 
     def __init__(self, file_path):
         with h5py.File(file_path,  "r") as f:
             ##Load some general properities
             sweeps = list(f['acquisition'].keys()) ##Sweeps are stored as keys
             self.sweepCount = len(sweeps)
-            self.rate = dict(f['acquisition'][sweeps[0]]['starting_time'].attrs.items())
+            self.rate = dict(f['acquisition'][sweeps[0]]['starting_time'].attrs.items())['rate']
             self.sweepYVars = dict(f['acquisition'][sweeps[0]]['data'].attrs.items())
-            #self.sweepCVars = dict(f['stimulus']['presentation'][sweeps[0]]['data'].attrs.items())
             ##Load the response and stim
-            data_space_s = 1/self.rate['rate']
             dataY = []
             dataX = []
             dataC = []
@@ -74,39 +71,40 @@ class old_nwbFile(object):
                 data_space_s = 1/(dict(f['acquisition'][sweeps[0]]['starting_time'].attrs.items())['rate'])
                 temp_dataY = np.asarray(f['acquisition'][sweep]['data'][()])
                 temp_dataX = np.cumsum(np.hstack((0, np.full(temp_dataY.shape[0]-1,data_space_s))))
-                #temp_dataC = np.asarray(f['stimulus']['presentation'][sweep]['data'][()])
+                try:
+                    temp_dataC = np.asarray(f['stimulus']['presentation'][sweep]['data'][()])
+                    dataC.append(temp_dataC)
+                except KeyError:
+                    logger.debug(f"No stimulus data found for sweep {sweep}")
                 dataY.append(temp_dataY)
                 dataX.append(temp_dataX)
-                #dataC.append(temp_dataC)
             try:
                 ##Try to vstack assuming all sweeps are same length
                 self.dataX = np.vstack(dataX)
-                self.dataC = np.vstack(dataC)
                 self.dataY = np.vstack(dataY)
-            except:
-                #Just leave as lists
+                self.dataC = np.vstack(dataC) if dataC else np.array([])
+            except ValueError:
+                #Just leave as lists if sweeps have different lengths
                 self.dataX = dataX
-                self.dataC = dataC
                 self.dataY = dataY
+                self.dataC = dataC
         return
 
 
 
 
 class nwbFile(object):
+    """Loads NWB files using the newer acquisition/timeseries key layout."""
 
     def __init__(self, file_path):
         with h5py.File(file_path,  "r") as f:
             ##Load some general properities
             sweeps = list(f['acquisition']['timeseries'].keys()) ##Sweeps are stored as keys
             self.sweepCount = len(sweeps)
-            #self.rate = dict(f['acquisition'][sweeps[0]]['starting_time'].attrs.items())
-            #self.sweepYVars = dict(f['acquisition'][sweeps[-1]]['data'].attrs.items())
             try:
                 self.sweepCVars = dict(f['stimulus']['presentation'][sweeps[-1]]['data'].attrs.items())
-            except:
+            except KeyError:
                 self.sweepCVars = None
-            #self.temp = f['general']['Temperature'][()]
             ## Find the index's with long square
             index_to_use = []
             for key in sweeps: 
@@ -114,7 +112,9 @@ class nwbFile(object):
                 if check_stimulus(sweep_dict):
                     index_to_use.append(key) 
 
-            
+            # Get sampling rate from first usable sweep
+            self.rate = dict(f['acquisition']['timeseries'][index_to_use[0]]['starting_time'].attrs.items())['rate'] if index_to_use else 50000
+
             dataY = []
             dataX = []
             dataC = []
@@ -124,9 +124,8 @@ class nwbFile(object):
                 try:
                     bias_current = f['acquisition']['timeseries'][sweep]['bias_current'][()]
                     if np.isnan(bias_current):
-                        #continue
                         bias_current = 0
-                except:
+                except KeyError:
                     bias_current = 0
                 temp_dataY = np.asarray(f['acquisition']['timeseries'][sweep]['data'][()])
                 temp_dataX = np.cumsum(np.hstack((0, np.full(temp_dataY.shape[0]-1,data_space_s))))
@@ -139,14 +138,15 @@ class nwbFile(object):
                 self.dataX = np.vstack(dataX)
                 self.dataC = np.vstack(dataC)
                 self.dataY = np.vstack(dataY)
-            except:
-                #Just leave as lists
+            except ValueError:
+                #Just leave as lists if sweeps have different lengths
                 self.dataX = dataX
                 self.dataC = dataC
                 self.dataY = dataY
         return
 
 class stim_names:
+    """Container for stimulus name inclusion/exclusion patterns."""
     stim_inc = ['Long', '1000']
     stim_exc = ['rheo', 'Rf50_']
     def __init__(self):
@@ -158,9 +158,8 @@ global_stim_names = stim_names()
 def check_stimulus(stim_desc):
     try:
         stim_desc_str = stim_desc.decode()
-    except:
-        stim_desc_str = stim_desc
-    #print(stim_desc_str)
+    except (AttributeError, UnicodeDecodeError):
+        stim_desc_str = str(stim_desc)
     include_s = np.any([x in stim_desc_str for x in global_stim_names.stim_inc])
     exclude_s = np.invert(np.any([x in stim_desc_str for x in global_stim_names.stim_exc]))
     return np.logical_and(include_s, exclude_s)

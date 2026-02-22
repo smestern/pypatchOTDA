@@ -21,7 +21,12 @@ from ot.utils import check_params, BaseEstimator
 from ot.unbalanced import sinkhorn_unbalanced
 from ot.optim import cg
 from ot.optim import gcg
-import torch
+try:
+    import torch
+except ImportError:
+    import warnings
+    warnings.warn("torch not installed, torch-based transport in domain.py will not work")
+    torch = None
 from ot.backend import get_backend
 
 def sinkhorn_lpl1_mm(a, labels_a, b, M, reg, eta=0.1, numItermax=10,
