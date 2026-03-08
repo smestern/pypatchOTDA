@@ -13,7 +13,15 @@ from .domainAdapt import (
     PENALTY_SENTINEL,
     TIMEOUT,
 )
-from .datasets import MMS_DATA
+try:
+    from .datasets import MMS_DATA
+except Exception:
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "Could not load MMS_DATA (possibly a pandas version mismatch). "
+        "patchOTDA.MMS_DATA will be unavailable."
+    )
+    MMS_DATA = None
 
 __all__ = [
     "PatchClampOTDA",

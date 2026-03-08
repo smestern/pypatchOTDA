@@ -1,0 +1,32 @@
+{
+    "joint_feats": [
+        "AP amplitude (mV)",
+        "AP width (ms)",
+        "Input resistance (M\u03a9)",
+        "Rebound APs (number)",
+        "Resting membrane potential (mV)",
+        "Sag ratio"
+    ],
+    "datasets": {
+        "CTKE_M1": {
+            "ephys": "CTKE_M1_ephys.csv",
+            "meta": "CTKE_M1_meta.csv"
+        },
+        "VISp_Viewer": {
+            "ephys": "VISp_Viewer_ephys.csv",
+            "meta": "VISp_Viewer_meta.csv"
+        },
+        "Query1": {
+            "ephys": "Query1_ephys.csv",
+            "meta": "Query1_meta.csv"
+        },
+        "Query2": {
+            "ephys": "Query2_ephys.csv",
+            "meta": "Query2_meta.csv"
+        },
+        "Query3": {
+            "ephys": "Query3_ephys.csv",
+            "meta": "Query3_meta.csv"
+        }
+    }
+}

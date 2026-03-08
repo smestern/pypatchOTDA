@@ -88,6 +88,156 @@ def test_skada():
     assert transformed.shape[0] == Xt_train.shape[0], "Transform should preserve sample count"
 
 
+@pytest.mark.skipif(not _HAS_SKADA, reason="skada not installed")
+def test_skada_mapping_adapters():
+    """Test mapping/alignment adapters: CORAL, OTMapping, LinearOT, EntropicOT."""
+    Xs, Ys = make_data_classif(dataset="3gauss", n=150, nz=0.5)
+    Xt, Yt = make_data_classif(dataset="3gauss2", n=150, nz=0.5)
+    Xt[:, 0] += 3
+    Xt[:, 1] += 3
+
+    for name, cls in [
+        ("CORALDA", skada.CORALDA),
+        ("OTMapping", skada.OTMapping),
+        ("LinearOT", skada.LinearOT),
+        ("EntropicOT", skada.EntropicOT),
+    ]:
+        adapter = cls()
+        adapter.fit(Xs, Xt, ys=Ys, yt=Yt)
+        transformed = adapter.transform(Xs, Xt=Xt)
+        assert transformed.shape == Xs.shape, (
+            f"{name}: shape mismatch {transformed.shape} vs {Xs.shape}"
+        )
+        assert not np.all(np.isnan(transformed)), f"{name}: all NaN output"
+
+        # fit_transform should produce same shape
+        transformed2 = cls().fit_transform(Xs, Xt=Xt, ys=Ys, yt=Yt)
+        assert transformed2.shape == Xs.shape, f"{name}: fit_transform shape mismatch"
+
+
+@pytest.mark.skipif(not _HAS_SKADA, reason="skada not installed")
+def test_skada_subspace_adapters():
+    """Test subspace adapters: TCA, SubspaceAlignment, etc."""
+    Xs, Ys = make_data_classif(dataset="3gauss", n=150, nz=0.5)
+    Xt, Yt = make_data_classif(dataset="3gauss2", n=150, nz=0.5)
+    Xt[:, 0] += 3
+    Xt[:, 1] += 3
+
+    adapters_to_test = [("TCA", skada.TCA)]
+
+    # Only test optional adapters if available
+    if skada.SubspaceAlignmentAdapter is not None:
+        adapters_to_test.append(("SubspaceAlignmentDA", skada.SubspaceAlignmentDA))
+    if skada.TransferJointMatchingAdapter is not None:
+        adapters_to_test.append(("TransferJointMatchingDA", skada.TransferJointMatchingDA))
+    if skada.TransferSubspaceLearningAdapter is not None:
+        adapters_to_test.append(("TransferSubspaceLearningDA", skada.TransferSubspaceLearningDA))
+
+    for name, cls in adapters_to_test:
+        adapter = cls()
+        adapter.fit(Xs, Xt, ys=Ys, yt=Yt)
+        transformed = adapter.transform(Xs, Xt=Xt)
+        # Subspace methods may reduce dimensionality
+        assert transformed.shape[0] == Xs.shape[0], (
+            f"{name}: sample count mismatch {transformed.shape[0]} vs {Xs.shape[0]}"
+        )
+        assert not np.all(np.isnan(transformed)), f"{name}: all NaN output"
+
+
+@pytest.mark.skipif(not _HAS_SKADA, reason="skada not installed")
+def test_skada_predictor_only():
+    """Test predictor-only methods raise NotImplementedError on transform."""
+    Xs, Ys = make_data_classif(dataset="3gauss", n=150, nz=0.5)
+    Xt, Yt = make_data_classif(dataset="3gauss2", n=150, nz=0.5)
+    Xt[:, 0] += 3
+    Xt[:, 1] += 3
+
+    predictors_to_test = []
+    if skada._DASVMClassifier is not None:
+        predictors_to_test.append(("DASVMClassifierDA", skada.DASVMClassifierDA))
+    if skada._OTLabelProp is not None:
+        predictors_to_test.append(("OTLabelPropDA", skada.OTLabelPropDA))
+
+    if not predictors_to_test:
+        pytest.skip("No predictor-only skada methods available")
+
+    for name, cls in predictors_to_test:
+        adapter = cls()
+        # fit may warn/fail on small 2D data – that's OK, we only test transform raises
+        adapter.fit(Xs, Xt, ys=Ys, yt=Yt)
+        with pytest.raises(NotImplementedError):
+            adapter.transform(Xs)
+
+
+@pytest.mark.skipif(not _HAS_SKADA, reason="skada not installed")
+def test_skada_with_patchclampotda():
+    """Test using a skada wrapper as transporter= in PatchClampOTDA."""
+    from patchOTDA import PatchClampOTDA
+
+    Xs, Ys = make_data_classif(dataset="3gauss", n=150, nz=0.5)
+    Xt, Yt = make_data_classif(dataset="3gauss2", n=150, nz=0.5)
+    Xt[:, 0] += 3
+    Xt[:, 1] += 3
+
+    # Test with class reference
+    otda = PatchClampOTDA(transporter=skada.CORALDA)
+    result = otda.fit_transform(Xs, Xt, Ys=Ys, Yt=Yt)
+    assert result.shape == Xs.shape, f"Class ref shape mismatch: {result.shape}"
+
+    # Test with string lookup
+    otda2 = PatchClampOTDA(transporter='coral')
+    result2 = otda2.fit_transform(Xs, Xt, Ys=Ys, Yt=Yt)
+    assert result2.shape == Xs.shape, f"String lookup shape mismatch: {result2.shape}"
+
+
+@pytest.mark.skipif(not _HAS_SKADA, reason="skada not installed")
+def test_skada_methods_dict():
+    """Verify METHODS dict is populated and all entries are valid."""
+    assert len(skada.METHODS) > 0, "METHODS dict is empty"
+    # All original methods should be present
+    for key in ["jdot", "jdotc", "otmapping", "entropicOT", "classOT", "linearOT", "coral", "TCA"]:
+        assert key in skada.METHODS, f"'{key}' missing from METHODS"
+
+    # TRANSFORM_CAPABLE_METHODS should exclude predictor-only
+    for name, cls in skada.TRANSFORM_CAPABLE_METHODS.items():
+        assert not issubclass(cls, skada.baseSkadaPredictor), (
+            f"'{name}' in TRANSFORM_CAPABLE_METHODS but is predictor-only"
+        )
+
+
+@pytest.mark.skipif(not _HAS_SKADA, reason="skada not installed")
+def test_skada_log_attribute():
+    """Verify log_ attribute is set after fit for tune() compatibility."""
+    adapter = skada.CORALDA()
+    Xs, Ys = make_data_classif(dataset="3gauss", n=100, nz=0.5)
+    Xt, Yt = make_data_classif(dataset="3gauss2", n=100, nz=0.5)
+    adapter.fit(Xs, Xt, ys=Ys, yt=Yt)
+    assert hasattr(adapter, "log_"), "log_ attribute missing after fit"
+    assert "warning" in adapter.log_, "log_ must contain 'warning' key"
+
+
+@pytest.mark.skipif(
+    not _HAS_SKADA or not skada._HAS_SKADA_METRICS,
+    reason="skada or skada.metrics not installed",
+)
+def test_skada_metrics():
+    """Test skada metric error functions return a float."""
+    Xs, Ys = make_data_classif(dataset="3gauss", n=100, nz=0.5)
+    Xt, Yt = make_data_classif(dataset="3gauss2", n=100, nz=0.5)
+    Xt[:, 0] += 3
+    Xt[:, 1] += 3
+
+    for name, func in [
+        ("prediction_entropy", skada.prediction_entropy_error),
+        ("soft_neighborhood_density", skada.soft_neighborhood_density_error),
+        ("circular_validation", skada.circular_validation_error),
+    ]:
+        result = func(Xs, Xt, Ys, Yt)
+        assert isinstance(result, (float, np.floating)), (
+            f"{name} returned {type(result)}, expected float"
+        )
+
+
 def test_ub_sink():
     """Test unbalanced Sinkhorn transport with simple shifted data."""
     OT = ot.da.UnbalancedSinkhornTransport()
@@ -104,3 +254,6 @@ def test_ub_sink():
     orig_dist = np.linalg.norm(Xs.mean(axis=0) - Xt.mean(axis=0))
     trans_dist = np.linalg.norm(Xs_transformed.mean(axis=0) - Xt.mean(axis=0))
     assert trans_dist < orig_dist, "Transformed data should be closer to target"
+
+if __name__ == "__main__":
+    pytest.main([__file__])

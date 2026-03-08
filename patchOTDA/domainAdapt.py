@@ -67,7 +67,25 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
             transporter = ot.da.EMDLaplaceTransport
 
         if isinstance(transporter, str):
-            transporter = getattr(ot.da, transporter)
+            # Try POT first, then fall back to skada wrappers
+            transporter_cls = getattr(ot.da, transporter, None)
+            if transporter_cls is not None:
+                transporter = transporter_cls
+            else:
+                try:
+                    from patchOTDA.external.skada import METHODS as _SKADA_METHODS
+                    if transporter in _SKADA_METHODS:
+                        transporter = _SKADA_METHODS[transporter]
+                    else:
+                        raise AttributeError(
+                            f"Transporter '{transporter}' not found in ot.da or "
+                            f"skada METHODS. Available skada methods: {list(_SKADA_METHODS.keys())}"
+                        )
+                except ImportError:
+                    raise AttributeError(
+                        f"Transporter '{transporter}' not found in ot.da and "
+                        "skada is not installed"
+                    )
 
         if kwargs is not None:
             if "numItermax" in kwargs:
@@ -266,6 +284,14 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
         #DEFAULTS
         unsupervised_methods = [ot.da.UnbalancedSinkhornTransport, ot.da.SinkhornTransport, ot.da.EMDTransport, ot.da.EMDLaplaceTransport]
         supervised_methods = [ot.da.SinkhornL1l2Transport, ot.da.SinkhornTransport, ot.da.EMDTransport, ot.da.SinkhornLpl1Transport]
+        # Optionally include skada-based transporters when available
+        try:
+            from patchOTDA.external.skada import TRANSFORM_CAPABLE_METHODS as _skada_methods
+            skada_transporters = list(_skada_methods.values())
+            unsupervised_methods = unsupervised_methods + skada_transporters
+            supervised_methods = supervised_methods + skada_transporters
+        except ImportError:
+            pass
         methods = supervised_methods if supervised else unsupervised_methods
         #build a local copy of the optimizable kwargs with similarity_param scaled to the datasets
         optimizable_kwargs = copy.deepcopy(DEFAULT_OPTIMIZABLE_KWARGS)
@@ -339,8 +365,24 @@ def timeout():
         return func_wrapper
     return timeout_decorator
 
+def _resolve_introspection_target(func):
+    """If *func* is a skada wrapper class (has ``_adapter``), return the
+    underlying adapter for signature introspection; otherwise return *func*."""
+    adapter = getattr(func, '_adapter', None)
+    if adapter is not None:
+        return adapter
+    return func
+
+
 def getValidKwargs(func, argsDict):
-    sig =  signature(func)
+    target = _resolve_introspection_target(func)
+    sig = signature(target)
+    # If the target accepts **kwargs, pass everything through
+    has_var_keyword = any(
+        p.kind == p.VAR_KEYWORD for p in sig.parameters.values()
+    )
+    if has_var_keyword:
+        return copy.deepcopy(argsDict)
     kwargs_names = [p.name for p in sig.parameters.values() if p.kind == p.POSITIONAL_OR_KEYWORD]
     new_args = {}
     for key, value in argsDict.items():
@@ -351,7 +393,8 @@ def getValidKwargs(func, argsDict):
     return new_args
 
 def getOptimizableKwargs(func, optimizableKwargs=DEFAULT_OPTIMIZABLE_KWARGS):
-    sig =  signature(func)
+    target = _resolve_introspection_target(func)
+    sig = signature(target)
     kwargs_names = [p.name for p in sig.parameters.values() if p.kind == p.POSITIONAL_OR_KEYWORD]
     new_args = {}
     list_opt_kwargs = list(optimizableKwargs.keys())
