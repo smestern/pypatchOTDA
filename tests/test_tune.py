@@ -56,8 +56,8 @@ def test_tune_real_data():
     Xs = scaler.fit_transform(Xs)
     Xt = scaler.transform(Xt)
 
-    da_tuned = pOTDA.PatchClampOTDA()
-    da_tuned.tune(Xs, Xt, n_iter=10, n_jobs=2, method='unidirectional', verbose=True)
+    da_tuned = pOTDA.PatchClampOTDA(flexible_transporter=True)
+    da_tuned.tune(Xs, Xt, n_iter=100, n_jobs=2, method='unidirectional', verbose=True)
 
     # After tuning, fit and transform with the best parameters
     Xs_tuned = da_tuned.fit_transform(Xs, Xt)
@@ -79,6 +79,20 @@ def test_tune_supervised():
     assert not np.all(np.isnan(Xs_shifted)), "Shifted data should not be all NaN"
     assert not np.all(Xs_shifted == 0), "Shifted data should not be all zeros"
     assert hasattr(p, 'best_'), "Tuned model should have best_ attribute"
+
+def test_tune_timeout():
+    """Test that tuning respects the timeout."""
+    p = pOTDA.PatchClampOTDA(flexible_transporter=True)
+
+    Xs = make_2D_samples_gauss(n=100, m=(0, 0), sigma=np.array([[1, 0], [0, 1]]))
+    Xt = make_2D_samples_gauss(n=150, m=(2.5, .5), sigma=np.array([[1, -.8], [-.8, 1]]))
+
+    # Set a very short timeout to force a timeout error
+    pOTDA.TIMEOUT = 0.001
+
+    #Should return penalty value
+    p.tune(Xs=Xs, Xt=Xt, n_jobs=2, n_iter=4, method="unidirectional", verbose=True)
+
 
 if __name__=="__main__":
     test_tune_real_data()

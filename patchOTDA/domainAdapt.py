@@ -24,7 +24,7 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 #create a logger
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+#logger.setLevel(logging.INFO)
 
 #optional imports
 try:
@@ -589,9 +589,10 @@ def gw_dist(Xs, Xt, Ys, Yt):
     q = ot.unif(Xt.shape[0])
 
     #estimate the cost matrix 
-
+    logger.info("Computing Gromov-Wasserstein distance for error function")
     log = ot.solve_gromov(
-        C1, C2, a=p, b=q, verbose=False, n_threads=5)
+        C1, C2, a=p, b=q, verbose=False, n_threads=1)
+    logger.info(f"Gromov-Wasserstein distance: {log.value}")
         
     return log.value
 
@@ -651,6 +652,8 @@ def rf_clf_dist(Xs, Xt, Ys, Yt):
     rf.fit(Xt[mask2], Yt[mask2])
     Ys_hat = rf.predict(Xs[mask])
     return 1 - balanced_accuracy_score(Ys[mask], Ys_hat)
+
+
 
 class metrics(object):
     #container for the distance metrics
