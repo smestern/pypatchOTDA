@@ -1,3 +1,6 @@
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from patchOTDA.datasets import MMS_DATA
 import patchOTDA.domainAdapt as pOTDA
 from ot.datasets import make_2D_samples_gauss, make_data_classif
 import numpy as np
@@ -7,7 +10,7 @@ import matplotlib.pyplot as plt
 import pytest
 
 
-pOTDA.TIMEOUT = None  # Disable timeout for testing
+pOTDA.TIMEOUT = 5  # Disable timeout for testing, we know these test (probably) should not run forever
 
 
 def test_tune_unsuper():
@@ -35,6 +38,30 @@ def test_tune_unsuper():
         f"Shifted data mean should be closer to target: original_dist={original_dist:.3f}, shifted_dist={shifted_dist:.3f}"
     )
 
+def test_tune_real_data():
+    """Test tuning with real data."""
+    da = pOTDA.PatchClampOTDA()
+
+    # Load data
+    Xs = MMS_DATA['CTKE_M1']['ephys']
+    Xt = MMS_DATA['VISp_Viewer']['ephys']
+    print(MMS_DATA.keys())
+    #make sure the features are the same
+    Xs = Xs.loc[:,MMS_DATA['joint_feats']].to_numpy()
+    Xt = Xt.loc[:,MMS_DATA['joint_feats']].to_numpy()
+    scaler = StandardScaler()
+    imputer = SimpleImputer(strategy='mean')
+    Xs = imputer.fit_transform(Xs)
+    Xt = imputer.transform(Xt)
+    Xs = scaler.fit_transform(Xs)
+    Xt = scaler.transform(Xt)
+
+    da_tuned = pOTDA.PatchClampOTDA()
+    da_tuned.tune(Xs, Xt, n_iter=10, n_jobs=2, method='unidirectional', verbose=True)
+
+    # After tuning, fit and transform with the best parameters
+    Xs_tuned = da_tuned.fit_transform(Xs, Xt)
+
 
 def test_tune_supervised():
     """Test supervised tuning with labelled synthetic data."""
@@ -52,3 +79,6 @@ def test_tune_supervised():
     assert not np.all(np.isnan(Xs_shifted)), "Shifted data should not be all NaN"
     assert not np.all(Xs_shifted == 0), "Shifted data should not be all zeros"
     assert hasattr(p, 'best_'), "Tuned model should have best_ attribute"
+
+if __name__=="__main__":
+    test_tune_real_data()

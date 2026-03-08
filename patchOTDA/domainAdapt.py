@@ -6,6 +6,7 @@ import warnings
 import joblib
 import multiprocessing.pool
 import functools
+import time
 import scipy.spatial as spatial
 import logging
 from inspect import signature
@@ -18,7 +19,7 @@ from ot.da import BaseTransport, distribution_estimation_uniform, check_params
 import ot
 from ot.utils import dist, cost_normalization
 
-from sklearn.metrics import balanced_accuracy_score, mean_squared_error
+from sklearn.metrics import balanced_accuracy_score
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 #create a logger
@@ -38,7 +39,7 @@ except ImportError:
     logging.warning("unbalancedgw not installed, unbalancedFUGWTransporter will not work")
     
 MAX_ITER = int(1e3)
-MAX_INNER_ITER = int(1e5)
+MAX_INNER_ITER = int(1e3)
 TIMEOUT = 60*2
 
 # Sentinel value returned for degenerate/failed solutions during tuning.
@@ -67,6 +68,18 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
 
         if isinstance(transporter, str):
             transporter = getattr(ot.da, transporter)
+
+        if kwargs is not None:
+            if "numItermax" in kwargs:
+                kwargs["numItermax"] = min(kwargs["numItermax"], MAX_ITER)
+            else:
+                kwargs['numItermax'] = MAX_ITER
+            if "numInnerItermax" in kwargs:
+                kwargs["numInnerItermax"] = min(kwargs["numInnerItermax"], MAX_INNER_ITER)
+            else:
+                kwargs['numInnerItermax'] = MAX_INNER_ITER
+        else:
+            kwargs = {"numItermax": MAX_ITER, "numInnerItermax": MAX_INNER_ITER} #we want to bump this a bit, they lowered the value in recent
         
         #super().__init__(**kwargs)
         #dont super init here, instantiate transporter first
@@ -151,9 +164,8 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
             #now just run the unidirectional tune
             self.param_dict = self.init_param_dict(Xs, Xt, method, error_func, supervised)
             return self._tune(Xs, Xt, Ys, Yt, n_iter, n_jobs, error_func, method, verbose)
-        
-
-        return self
+        else:
+            raise ValueError(f"Unknown tuning method '{method}'. Must be 'unidirectional' or 'bidirectional'.")
     
     def _tune(self, Xs, Xt, Ys=None, Yt=None, n_iter=20, n_jobs=-1, error_func=None, method='unidirectional', verbose=False):
         """ Tune the parameters of the OTDA based transporter to the datasets provided.
@@ -191,30 +203,30 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
             direction = None
 
         #init a nevergrad optimization
-        self.opt = ng.optimizers.Portfolio(self.param_dict, budget=n_iter*n_jobs, num_workers=n_jobs,)
+        n_rounds = max(1, n_iter // n_jobs)
+        total_evals = n_rounds * n_jobs
+        self.opt = ng.optimizers.Portfolio(self.param_dict, budget=total_evals, num_workers=n_jobs,)
         with warnings.catch_warnings():#Catch the sinkhorn warnings
             warnings.simplefilter("ignore")
-            for i in np.arange(n_iter//n_jobs):
+            for i in range(n_rounds):
 
                 #get the current params
                 param_list = []
-                for n in np.arange(n_jobs):
+                for n in range(n_jobs):
                     param_list.append(self.opt.ask())
                 #get the current score
                 if self.flexible_transporter:
                     #get the current transporter
                     
-                    score = joblib.Parallel(n_jobs=n_jobs,  prefer="threads", require='sharedmem', verbose=max(int(verbose) - 1, 0))(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, opt_kwargs=p.value) for p in param_list)
+                    score = joblib.Parallel(n_jobs=n_jobs,  require='sharedmem', verbose=max(int(verbose) - 1, 0))(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, opt_kwargs=p.value) for p in param_list)
                 else:
                     transporter = self.inittransporter
-                    score = joblib.Parallel(n_jobs=n_jobs,  prefer="threads", require='sharedmem', verbose=max(int(verbose) -1, 0))(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, transporter=transporter, opt_kwargs=p.value) for p in param_list)
+                    score = joblib.Parallel(n_jobs=n_jobs,  require='sharedmem', verbose=max(int(verbose) -1, 0))(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, transporter=transporter, opt_kwargs=p.value) for p in param_list)
                 #update the nevergrad params
                 for p, e in zip(param_list, score):
                     self.opt.tell(p, e)
-                #self.opt.tell(params, score)
                 if verbose>0:
-                    #print(f"iteration {i+1}/{n_iter} best score: {np.amin(score)}")
-                    logger.info(f"iteration {(i+1)*n_jobs}/{n_iter} best score: {np.amin(score)}")
+                    logger.info(f"round {i+1}/{n_rounds} ({(i+1)*n_jobs}/{total_evals} evals) best score: {np.amin(score)}")
         #get the best transporter
         logger.info("best kwargs:")
         best_args = self.opt.recommend().value
@@ -238,24 +250,26 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
         return transporter, getValidKwargs(transporter, kwargs)
 
 
-    def init_param_dict(self, Xt, Xs, method, error_func, supervised):
-        """Initialize the param dict for the nevergrad optimizer
+    def init_param_dict(self, Xs, Xt, method, error_func, supervised):
+        """Initialize the param dict for the nevergrad optimizer.
 
         Args:
-            Xt (_type_): _description_
-            Xs (_type_): _description_
-            method (_type_): _description_
-            error_func (_type_): _description_
+            Xs (numpy array): Source data.
+            Xt (numpy array): Target data.
+            method (str): Tuning method ('unidirectional' or 'bidirectional').
+            error_func (callable or None): Error function for scoring.
+            supervised (bool): Whether to use supervised transporter methods.
 
         Returns:
-            dict: _description_
+            ng.p.Dict or ng.p.Choice: Nevergrad parametrization for the optimizer.
         """        
         #DEFAULTS
         unsupervised_methods = [ot.da.UnbalancedSinkhornTransport, ot.da.SinkhornTransport, ot.da.EMDTransport, ot.da.EMDLaplaceTransport]
         supervised_methods = [ot.da.SinkhornL1l2Transport, ot.da.SinkhornTransport, ot.da.EMDTransport, ot.da.SinkhornLpl1Transport]
         methods = supervised_methods if supervised else unsupervised_methods
-        #update the defaults similiarity params to max of the two datasets
-        DEFAULT_OPTIMIZABLE_KWARGS.update({'similarity_param':ng.p.Scalar(lower=2, upper=np.amin([Xt.shape[0], Xs.shape[0]]))})
+        #build a local copy of the optimizable kwargs with similarity_param scaled to the datasets
+        optimizable_kwargs = copy.deepcopy(DEFAULT_OPTIMIZABLE_KWARGS)
+        optimizable_kwargs['similarity_param'] = ng.p.Scalar(lower=2, upper=np.amin([Xs.shape[0], Xt.shape[0]]))
 
         #for now support  reg, norm,
         if method == 'bidirectional':
@@ -263,7 +277,7 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
             # #here we want to clone each option to add a backward and forward option
             options = []
             for x in methods:
-                method_kwargs = getOptimizableKwargs(x)
+                method_kwargs = getOptimizableKwargs(x, optimizable_kwargs)
                 #add the forward and backward options
                 #essentially just clone each key and affix forward and backward
                 method_kwargs_forward = {k+'_forward':copy.deepcopy(v) for k,v in method_kwargs.items()}
@@ -282,17 +296,21 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
         elif method == 'unidirectional':
             #if the user wants unidirectional tune
             if self.flexible_transporter:
-                options = [ng.p.Dict(**getOptimizableKwargs(x)) for x in methods]
+                options = [ng.p.Dict(**getOptimizableKwargs(x, optimizable_kwargs)) for x in methods]
                 _param_dict = ng.p.Choice(options)
             else:
                 #we want to figure out what params go with what transporter
-                _param_dict = ng.p.Dict(**getOptimizableKwargs(self.inittransporter))
+                _param_dict = ng.p.Dict(**getOptimizableKwargs(self.inittransporter, optimizable_kwargs))
             #now just run the unidirectional tune
-            
+        
+        #if the params are found in the users init kwargs we need to consider them fixed
+        
+
         return _param_dict
     
 
 #UTIL FUNCTIONS
+
 
 ##From https://stackoverflow.com/a/35139284
 def timeout():
@@ -383,9 +401,12 @@ error_func=None, verbose=False, opt_kwargs=None,):
         opt_kwargs = {}
     forward_kwargs = {k[:k.find('_forward')]:v for k,v in opt_kwargs.items() if '_forward' in k}
     backward_kwargs = {k[:k.find('_backward')]:v for k,v in opt_kwargs.items() if '_backward' in k}
+    #extract the transporter class from the kwargs if present (set by nevergrad)
+    forward_transporter = forward_kwargs.pop('transporter', transporter)
+    backward_transporter = backward_kwargs.pop('transporter', transporter)
     
     if error_func is None:
-        error_func = mean_squared_error
+        error_func = rowwise_mse
     #print("Tuning the transporter")
     if sample_size is None:
         #make it the same ratio of Xs and Xt
@@ -401,24 +422,20 @@ error_func=None, verbose=False, opt_kwargs=None,):
         Yt_sample = Yt[rand_idx]
     else:
         Yt_sample = None
-    Xt_base = np.delete(Xt, rand_idx, axis=0)
-
     #reinit the transporter with the reg_kwargs
-    transporter_one = transporter(**getValidKwargs(transporter, forward_kwargs), log=True)
+    transporter_one = forward_transporter(**getValidKwargs(forward_transporter, forward_kwargs), log=True)
     #fit the transporter but the other direction
     #transporter_one.fit(Xs=Xt_sample, Xt=Xs)
     #transform the data
     Xt_transport = transporter_one.fit_transform(Xs=Xt_sample, Xt=Xs, ys=Yt_sample, yt=Ys)
 
     #reinit the transporter with the reg_kwargs
-    transporter_two = transporter(**getValidKwargs(transporter, backward_kwargs), log=True)
-    #fit the transporter
-    #transporter_one.fit(Xs=Xt_transport, Xt=Xt_base)
-    #transform the data
+    transporter_two = backward_transporter(**getValidKwargs(backward_transporter, backward_kwargs), log=True)
+    #transform the data back to reconstruct the original
     Xt_reconstructed = transporter_two.fit_transform(Xs=Xt_transport, Xt=Xt,  ys=Yt_sample, yt=Yt)
     
-    error = error_func(Xt_sample, Xt_reconstructed)
-    #Check for erros in fitting
+    error = error_func(Xt_sample, Xt_reconstructed, Yt_sample, Yt)
+    #Check for errors in fitting
     if np.all(np.isnan(Xt_transport)) or np.all(np.isnan(Xt_reconstructed)):
         error = PENALTY_SENTINEL
     elif np.all(Xt_reconstructed==0):
@@ -426,38 +443,30 @@ error_func=None, verbose=False, opt_kwargs=None,):
     elif np.all(Xt_transport==0):
         error = PENALTY_SENTINEL
 
-    #also try one final transport of the whole data
-    transporter_three = transporter(**getValidKwargs(transporter, backward_kwargs), log=True)
-    #fit the transporter
-    transporter_three.fit(Xs=Xt, Xt=Xs)
-    
-    #check the log
-    if 'warning' in transporter_one.log_:
-        if (transporter_one.log_['warning'] is not None) or (transporter_two.log_['warning'] is not None) or (transporter_three.log_['warning'] is not None):
+    #check the log for warnings from either transporter
+    for _t in [transporter_one, transporter_two]:
+        if 'warning' in _t.log_ and _t.log_['warning'] is not None:
             error = PENALTY_SENTINEL
+            break
 
     return error
 
 @timeout()
-def _tune_transporter(Xs, Xt, Ys, Yt, transporter=ot.da.SinkhornTransport,  error_func=None, opt_kwargs=None, subsample=False, label_mask=True):
-    """_summary_
+def _tune_transporter(Xs, Xt, Ys, Yt, transporter=ot.da.SinkhornTransport, error_func=None, opt_kwargs=None):
+    """Evaluate a single transporter configuration for unidirectional tuning.
+
+    Transports Xs -> Xt using the given transporter and kwargs, then measures
+    the error between the transported source and the target with error_func.
 
     Args:
-        transporter (_type_): _description_
-        Xs (_type_): _description_
-        Xt (_type_): _description_
-        Ys (_type_): _description_
-        Yt (_type_): _description_
-        sample_size (_type_, optional): _description_. Defaults to None.
-        reg1_backward (_type_, optional): _description_. Defaults to 1e-1.
-        reg2_backward (_type_, optional): _description_. Defaults to 1e-1.
-        norm (str, optional): _description_. Defaults to 'median'.
-        metric (str, optional): _description_. Defaults to 'sqeuclidean'.
-        limit_max (int, optional): _description_. Defaults to 10.
-        error_func (_type_, optional): _description_. Defaults to None.
-        verbose (bool, optional): _description_. Defaults to False.
+        Xs (numpy array): Source data, shape (n_source, n_features).
+        Xt (numpy array): Target data, shape (n_target, n_features).
+        Ys (numpy array or None): Source labels.
+        Yt (numpy array or None): Target labels.
+        transporter (class): OT transporter class to instantiate.
+        error_func (callable or None): Error function with signature (Xs, Xt, Ys, Yt) -> float.
+        opt_kwargs (dict or None): Kwargs to pass to the transporter constructor.
     """
-    #print("Tuning the transporter")
     if opt_kwargs is None:
         opt_kwargs = {}
     if 'transporter' in list(opt_kwargs.keys()):
@@ -466,13 +475,8 @@ def _tune_transporter(Xs, Xt, Ys, Yt, transporter=ot.da.SinkhornTransport,  erro
     if error_func is None:
         error_func = gw_dist
 
-    data = prepare_data(Xs, Xt, Ys, Yt, subsample=subsample, label_mask=label_mask)
-
-    #print("Tuning the transporter")
     #simply transport
     transporter_ = transporter(**getValidKwargs(transporter, opt_kwargs), log=True)
-    #fit the transporter
-    transporter_.fit(Xs=Xs, Xt=Xt, ys=Ys, yt=Yt)
     #transform the data
     Xs_transport = transporter_.fit_transform(Xs=Xs, Xt=Xt, ys=Ys, yt=Yt)
     #check the error
@@ -489,7 +493,10 @@ def _tune_transporter(Xs, Xt, Ys, Yt, transporter=ot.da.SinkhornTransport,  erro
     if 'warning' in transporter_.log_:
         #if there is a warning it is an integration error, despite low recorded error the result is funky so just punish the error term
         if transporter_.log_['warning'] is not None:
-            error = PENALTY_SENTINEL
+            if "numItermax" in transporter_.log_['warning']:
+                logger.debug("Warning: numItermax reached in transporter")
+            else:
+                error = PENALTY_SENTINEL
     return error 
 
 
@@ -509,7 +516,7 @@ def prepare_data(Xs, Xt, Ys, Yt, subsample=False, label_mask=False, sample_size=
         mask_size: the size of the mask
     returns:
         data: a dictionary containing the data, with the masked labels ('Ys_mask', 'Yt_mask') 
-        and the subsampled data ('Xs_sample', 'Xt_sample', 'Ys_sample', 'Yt_sample'
+        and the subsampled data ('Xs_sample', 'Xt_sample', 'Ys_sample', 'Yt_sample')
 
     """
     #prepare the data for the OTDA
@@ -541,11 +548,11 @@ def prepare_data(Xs, Xt, Ys, Yt, subsample=False, label_mask=False, sample_size=
             #make it the same ratio of Xs and Xt
             sample_size = np.clip(Xs.shape[0]/Xt.shape[0], 0.1, 0.5) #at least 1 sample, at most half of the smaller one
 
-        rand_idx = np.random.choice(np.arange(Xt.shape[0]), replace=False)
+        rand_idx = np.random.choice(np.arange(Xt.shape[0]), size=int(sample_size * Xt.shape[0]), replace=False)
         Xt_sample = Xt[rand_idx, :]
         Yt_sample = Yt[rand_idx] if Yt is not None else None
 
-        rand_idx = np.random.choice(np.arange(Xs.shape[0]), replace=False)
+        rand_idx = np.random.choice(np.arange(Xs.shape[0]), size=int(sample_size * Xs.shape[0]), replace=False)
         Xs_sample = Xs[rand_idx, :]
         Ys_sample = Ys[rand_idx] if Ys is not None else None
         data['Xs_sample'] = Xs_sample
@@ -567,7 +574,7 @@ def normalized_mse(x,y, yx, yy):
 def rowwise_mse(x, y, yx, yy):
     return np.mean(np.square(x-y))
 
-def mape(x, y):
+def mape(x, y, yx=None, yy=None):
     return np.abs(np.nanmean((np.abs(x-y))/(x)))
 
 def gw_dist(Xs, Xt, Ys, Yt):
