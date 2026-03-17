@@ -10,7 +10,6 @@ import matplotlib.pyplot as plt
 import pytest
 
 
-pOTDA.TIMEOUT = 5  # Disable timeout for testing, we know these test (probably) should not run forever
 
 
 def test_tune_unsuper():
@@ -95,4 +94,5 @@ def test_tune_timeout():
 
 
 if __name__=="__main__":
+    pOTDA.TIMEOUT = None # Disable timeout for testing
     test_tune_real_data()

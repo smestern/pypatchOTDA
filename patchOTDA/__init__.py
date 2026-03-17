@@ -23,11 +23,45 @@ except Exception:
     )
     MMS_DATA = None
 
+try:
+    from .utils import (
+        EXAMPLE_DATA_,
+        REF_DATA_,
+        VISp_MET_nodes,
+        VISp_T_nodes,
+        HICLASS_METHOD,
+        MODELS,
+        CLASS_MODELS,
+        select_by_col,
+        not_select_by_col,
+        filter_MMS,
+        param_grid_from_dict,
+        find_outlier_idxs,
+    )
+except Exception:
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "Could not load patchOTDA.utils (optional dependencies may be missing). "
+        "Utility functions and model registries will be unavailable."
+    )
+
 __all__ = [
     "PatchClampOTDA",
     "metrics",
     "MMS_DATA",
     "PENALTY_SENTINEL",
     "TIMEOUT",
+    "EXAMPLE_DATA_",
+    "REF_DATA_",
+    "VISp_MET_nodes",
+    "VISp_T_nodes",
+    "HICLASS_METHOD",
+    "MODELS",
+    "CLASS_MODELS",
+    "select_by_col",
+    "not_select_by_col",
+    "filter_MMS",
+    "param_grid_from_dict",
+    "find_outlier_idxs",
     "__version__",
 ]
