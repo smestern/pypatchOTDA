@@ -10,7 +10,7 @@ import time
 import scipy.spatial as spatial
 import logging
 from inspect import signature
-
+import joblib
 
 import nevergrad as ng
 import sklearn
@@ -40,7 +40,7 @@ except ImportError:
     
 MAX_ITER = int(1e3)
 MAX_INNER_ITER = int(1e3)
-TIMEOUT = 60*2
+TIMEOUT = 60*5 # Timeout for tuning function in seconds (5 minutes)
 
 # Sentinel value returned for degenerate/failed solutions during tuning.
 # Use this constant instead of magic numbers throughout.
@@ -212,6 +212,14 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
         if n_jobs == -1:
             n_jobs = multiprocessing.cpu_count()
 
+        # if n_jobs > 1:
+        #     #we need to set the timeout to use the joblib timeout handler, which will return a penalty value if the function takes too long to run. This is important for tuning, as some parameter combinations may take a very long time to run, and we want to be able to handle that gracefully.
+        #     #but my hacky timeout breaks in joblib
+        #     global TIMEOUT
+        #     _timeout = TIMEOUT #save for restoring after tuning, we dont want to break the users code outside of tuning
+        #     TIMEOUT = None
+            
+
         #set the tune function depending on the method
         if method == 'bidirectional':
             tune_func = _inner_tune_back_and_forth
@@ -227,7 +235,6 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
         with warnings.catch_warnings():#Catch the sinkhorn warnings
             warnings.simplefilter("ignore")
             for i in range(n_rounds):
-
                 #get the current params
                 param_list = []
                 for n in range(n_jobs):
@@ -235,11 +242,10 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
                 #get the current score
                 if self.flexible_transporter:
                     #get the current transporter
-                    
-                    score = joblib.Parallel(n_jobs=n_jobs,  require='sharedmem', verbose=max(int(verbose) - 1, 0))(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, opt_kwargs=p.value) for p in param_list)
+                    score = joblib.Parallel(n_jobs=n_jobs,verbose=max(int(verbose) - 1, 0))(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, opt_kwargs=p.value) for p in param_list)
                 else:
                     transporter = self.inittransporter
-                    score = joblib.Parallel(n_jobs=n_jobs,  require='sharedmem', verbose=max(int(verbose) -1, 0))(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, transporter=transporter, opt_kwargs=p.value) for p in param_list)
+                    score = joblib.Parallel(n_jobs=n_jobs,   verbose=max(int(verbose) -1, 0))(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, transporter=transporter, opt_kwargs=p.value) for p in param_list)
                 #update the nevergrad params
                 for p, e in zip(param_list, score):
                     self.opt.tell(p, e)
@@ -252,6 +258,13 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
         transporter, best_kwargs = self._to_kwarg_dict(self.inittransporter, kwargs=copy.copy(best_args), direction=direction)
         self.transporter = transporter(**best_kwargs,  log=True)
         self.best_ = best_kwargs
+
+        # #put timeout back
+        # if n_jobs > 1:
+        #     #we need to set the timeout to use the joblib timeout handler, which will return a penalty value if the function takes too long to run. This is important for tuning, as some parameter combinations may take a very long time to run, and we want to be able to handle that gracefully.
+        #     #but my hacky timeout breaks in joblib
+        #     TIMEOUT = _timeout
+
         return self
 
     
@@ -284,14 +297,14 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
         #DEFAULTS
         unsupervised_methods = [ot.da.UnbalancedSinkhornTransport, ot.da.SinkhornTransport, ot.da.EMDTransport, ot.da.EMDLaplaceTransport]
         supervised_methods = [ot.da.SinkhornL1l2Transport, ot.da.SinkhornTransport, ot.da.EMDTransport, ot.da.SinkhornLpl1Transport]
-        # Optionally include skada-based transporters when available
-        try:
-            from patchOTDA.external.skada import TRANSFORM_CAPABLE_METHODS as _skada_methods
-            skada_transporters = list(_skada_methods.values())
-            unsupervised_methods = unsupervised_methods + skada_transporters
-            supervised_methods = supervised_methods + skada_transporters
-        except ImportError:
-            pass
+        # # Optionally include skada-based transporters when available
+        # try:
+        #     from patchOTDA.external.skada import TRANSFORM_CAPABLE_METHODS as _skada_methods
+        #     skada_transporters = list(_skada_methods.values())
+        #     unsupervised_methods = unsupervised_methods + skada_transporters
+        #     supervised_methods = supervised_methods + skada_transporters
+        # except ImportError:
+        #     pass
         methods = supervised_methods if supervised else unsupervised_methods
         #build a local copy of the optimizable kwargs with similarity_param scaled to the datasets
         optimizable_kwargs = copy.deepcopy(DEFAULT_OPTIMIZABLE_KWARGS)
@@ -437,9 +450,11 @@ error_func=None, verbose=False, opt_kwargs=None,):
     Returns:
         _type_: _description_
     """
-    #pull out the forward and backward kwargs, the forward kwargs will have _forward affixed to the end of the key
+    ##pull out the forward and backward kwargs, the forward kwargs will have _forward affixed to the end of the key
     #the backward kwargs will have _backward affixed to the end of the key
     #we will use these to update the transporter kwargs
+
+
     if opt_kwargs is None:
         opt_kwargs = {}
     forward_kwargs = {k[:k.find('_forward')]:v for k,v in opt_kwargs.items() if '_forward' in k}
@@ -517,9 +532,12 @@ def _tune_transporter(Xs, Xt, Ys, Yt, transporter=ot.da.SinkhornTransport, error
 
     if error_func is None:
         error_func = gw_dist
+    
+    #add "log=True" to the transporter kwargs to check for warnings
+    opt_kwargs.update({'log':True})
 
     #simply transport
-    transporter_ = transporter(**getValidKwargs(transporter, opt_kwargs), log=True)
+    transporter_ = transporter(**getValidKwargs(transporter, opt_kwargs))
     #transform the data
     Xs_transport = transporter_.fit_transform(Xs=Xs, Xt=Xt, ys=Ys, yt=Yt)
     #check the error
@@ -620,7 +638,12 @@ def rowwise_mse(x, y, yx, yy):
 def mape(x, y, yx=None, yy=None):
     return np.abs(np.nanmean((np.abs(x-y))/(x)))
 
+@timeout()
 def gw_dist(Xs, Xt, Ys, Yt):
+    """
+    Compute the Gromov-wasserstein between two sets of samples.
+    Takes:
+    """
     #compute the GW distance between two sets of samples
     #compute the cost matrix
     C1 = ot.dist(Xs, Xs)
@@ -634,7 +657,8 @@ def gw_dist(Xs, Xt, Ys, Yt):
     #estimate the cost matrix 
     logger.info("Computing Gromov-Wasserstein distance for error function")
     log = ot.solve_gromov(
-        C1, C2, a=p, b=q, verbose=False, n_threads=1)
+        C1, C2, a=p, b=q, verbose=False, max_iter=500, n_threads=1) #threads fixed to 1 as we are already parallelizing the tuning, 
+    #and this can cause issues with nested parallelism. We can consider adding a parameter for this in the future if we want to allow for more parallelism.
     logger.info(f"Gromov-Wasserstein distance: {log.value}")
         
     return log.value

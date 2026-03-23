@@ -90,9 +90,9 @@ def test_tune_timeout():
     pOTDA.TIMEOUT = 0.001
 
     #Should return penalty value
-    p.tune(Xs=Xs, Xt=Xt, n_jobs=2, n_iter=4, method="unidirectional", verbose=True)
+    p.tune(Xs=Xs, Xt=Xt, n_jobs=2, n_iter=10, method="unidirectional", verbose=True)
 
 
 if __name__=="__main__":
-    pOTDA.TIMEOUT = None # Disable timeout for testing
+    pOTDA.TIMEOUT = 120 # Disable timeout for testing
     test_tune_real_data()

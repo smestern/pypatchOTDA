@@ -175,14 +175,10 @@ def _build_label_encoders():
                 MMS_DATA[data]['meta'][f'VISp_T_{x}_en'] = le.transform(labels)
 
 
-# Run builders at import time (matches original utils.py behavior)
-if MMS_DATA is not None:
-    try:
-        _build_met_nodes()
-        _build_t_nodes()
-        _build_label_encoders()
-    except Exception:
-        logger.warning("Failed to build label trees / encoders from MMS_DATA.", exc_info=True)
+
+_build_met_nodes()
+_build_t_nodes()
+_build_label_encoders()
 
 # ---------------------------------------------------------------------------
 # Model registries
