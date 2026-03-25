@@ -53,6 +53,7 @@ DEFAULT_OPTIMIZABLE_KWARGS = {'reg': ng.p.Log(lower=1e-10, upper=1),
 
 
 class PatchClampOTDA(BaseEstimator, BaseTransport):
+
     def __init__(self, transporter=None, flexible_transporter=False, **kwargs):
         """Domain Adaptation with OT with a specific focus on patch clamp based data. Here we use the OT-DA framework.
         This wrapper for pyOT based domain adaptation. Fit and transform functions are implemented to transform one piece of data to another.
@@ -242,10 +243,10 @@ class PatchClampOTDA(BaseEstimator, BaseTransport):
                 #get the current score
                 if self.flexible_transporter:
                     #get the current transporter
-                    score = joblib.Parallel(n_jobs=n_jobs,verbose=max(int(verbose) - 1, 0))(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, opt_kwargs=p.value) for p in param_list)
+                    score = joblib.Parallel(n_jobs=n_jobs, require="sharedmem", verbose=max(int(verbose) - 1, 0))(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, opt_kwargs=p.value) for p in param_list)
                 else:
                     transporter = self.inittransporter
-                    score = joblib.Parallel(n_jobs=n_jobs,   verbose=max(int(verbose) -1, 0))(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, transporter=transporter, opt_kwargs=p.value) for p in param_list)
+                    score = joblib.Parallel(n_jobs=n_jobs, require="sharedmem", verbose=max(int(verbose) -1, 0))(joblib.delayed(tune_func)(Xs, Xt, Ys, Yt, error_func=error_func, transporter=transporter, opt_kwargs=p.value) for p in param_list)
                 #update the nevergrad params
                 for p, e in zip(param_list, score):
                     self.opt.tell(p, e)
